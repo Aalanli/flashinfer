@@ -490,7 +490,6 @@ def main():
                         else:
                             raise
 
-
     if args.op in ["all", "dsv3_topk"]:
         # DeepSeek v3 sparse-attention shapes: long contexts, moderate batch sizes, k=2048
         dsv3_batch_sizes = [1, 2, 4, 32, 64]
@@ -498,7 +497,9 @@ def main():
 
         print("\n" + "=" * 100)
         print("dsv3_topk: DeepSeek v3 sparse-attention top-K shapes (k=2048, float32)")
-        print("  fast_topk_clusters: histogram-driven radix top-K (variable-length aware)")
+        print(
+            "  fast_topk_clusters: histogram-driven radix top-K (variable-length aware)"
+        )
         print("  flashinfer top_k:   generic radix top-K (padded input)")
         if args.compare_sglang:
             print("  SGLang fast_topk_v2: variable-length aware (requires sgl_kernel)")

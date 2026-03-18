@@ -82,7 +82,9 @@ def _make_test_data(batch_size: int, seq_len: int):
     k_cache = _make_kv_cache(total_pages)
     weights = torch.randn(batch_size, 64, dtype=torch.float32, device="cuda")
 
-    block_table = torch.zeros(batch_size, max_num_pages, dtype=torch.int32, device="cuda")
+    block_table = torch.zeros(
+        batch_size, max_num_pages, dtype=torch.int32, device="cuda"
+    )
     for b in range(batch_size):
         start = b * num_pages_per_seq
         block_table[b, :num_pages_per_seq] = torch.arange(
@@ -120,15 +122,21 @@ def bench_dsv3_sparse_indexer(
     q, k_cache, weights, seq_lens, block_table = _make_test_data(batch_size, seq_len)
     max_model_len = block_table.shape[1] * 64
     sm_map = get_mqa_metadata(seq_lens)
-    
-    enable_cupti = True 
+
+    enable_cupti = True
     use_cuda_graph = True
 
     # -- fused: logits + histogram top-K in one pass --------------------------
     measurements = bench_gpu_time(
         lambda: mqa_topk_indexer(
-            q, k_cache, weights, seq_lens, block_table,
-            sm_map=sm_map, max_model_len=max_model_len, pdl_enabled=pdl_enabled,
+            q,
+            k_cache,
+            weights,
+            seq_lens,
+            block_table,
+            sm_map=sm_map,
+            max_model_len=max_model_len,
+            pdl_enabled=pdl_enabled,
         ),
         enable_cupti=enable_cupti,
         use_cuda_graph=use_cuda_graph,
@@ -140,8 +148,13 @@ def bench_dsv3_sparse_indexer(
     # -- non-fused: separate logits + radix top-K ----------------------------
     measurements = bench_gpu_time(
         lambda: mqa_topk_indexer_non_fused(
-            q, k_cache, weights, seq_lens, block_table,
-            sm_map=sm_map, max_model_len=max_model_len,
+            q,
+            k_cache,
+            weights,
+            seq_lens,
+            block_table,
+            sm_map=sm_map,
+            max_model_len=max_model_len,
         ),
         enable_cupti=enable_cupti,
         use_cuda_graph=use_cuda_graph,
@@ -168,8 +181,14 @@ def bench_dsv3_sparse_indexer(
 
         def _deepgemm_ref():
             logits = deep_gemm.fp8_paged_mqa_logits(
-                q_dg, k_cache, weights, seq_lens, block_table,
-                meta_dg, seq_len, clean_logits=False,
+                q_dg,
+                k_cache,
+                weights,
+                seq_lens,
+                block_table,
+                meta_dg,
+                seq_len,
+                clean_logits=False,
             )
             flashinfer.top_k(logits, k=2048)
 
@@ -220,10 +239,11 @@ def main():
     )
     args = parser.parse_args()
 
-
     pdl_str = " PDL=on" if args.pdl else ""
     print("=" * 100)
-    print(f"dsv3_sparse_indexer: DeepSeek v3 sparse-attention end-to-end (k=2048, fp8){pdl_str}")
+    print(
+        f"dsv3_sparse_indexer: DeepSeek v3 sparse-attention end-to-end (k=2048, fp8){pdl_str}"
+    )
     print("  mqa_fused:     FlashInfer fused logits + histogram top-K")
     print("  mqa_non_fused: FlashInfer separate logits + radix top-K")
     if HAS_DEEP_GEMM:
@@ -238,8 +258,7 @@ def main():
         )
     else:
         header = (
-            f"{'batch':>6} {'seq_len':>10} |"
-            f" {'mqa_fused':>12} {'mqa_non_fused':>15}"
+            f"{'batch':>6} {'seq_len':>10} | {'mqa_fused':>12} {'mqa_non_fused':>15}"
         )
     print(header)
     print("-" * (60 if not HAS_DEEP_GEMM else 82))

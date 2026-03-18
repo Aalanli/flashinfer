@@ -29,7 +29,9 @@ from .utils import register_custom_op, register_fake_op
 def get_mqa_histogram_module():
     module = gen_mqa_histogram_module().build_and_load()
 
-    @register_custom_op("flashinfer::mqa_topk_indexer", mutates_args=("histogram", "logits", "indices"))
+    @register_custom_op(
+        "flashinfer::mqa_topk_indexer", mutates_args=("histogram", "logits", "indices")
+    )
     def _mqa_topk_indexer(
         q: torch.Tensor,
         k_cache: torch.Tensor,
@@ -44,8 +46,17 @@ def get_mqa_histogram_module():
         sm_multiple: int,
     ) -> None:
         module.mqa_topk_indexer(
-            q, k_cache, weights, seq_lens, block_table,
-            histogram, sm_map, logits, indices, pdl_enabled, sm_multiple,
+            q,
+            k_cache,
+            weights,
+            seq_lens,
+            block_table,
+            histogram,
+            sm_map,
+            logits,
+            indices,
+            pdl_enabled,
+            sm_multiple,
         )
 
     @register_fake_op("flashinfer::mqa_topk_indexer")
@@ -77,10 +88,16 @@ def get_mqa_histogram_module():
         num_physical_sms: int,
     ) -> torch.Tensor:
         batch_size = seq_lens.size(0)
-        num_logical_sms = (batch_size + num_physical_sms - 1) // num_physical_sms * num_physical_sms
-        return torch.empty(num_logical_sms, 4, dtype=torch.int32, device=seq_lens.device)
+        num_logical_sms = (
+            (batch_size + num_physical_sms - 1) // num_physical_sms * num_physical_sms
+        )
+        return torch.empty(
+            num_logical_sms, 4, dtype=torch.int32, device=seq_lens.device
+        )
 
-    @register_custom_op("flashinfer::fast_topk_clusters_fused", mutates_args=("indices",))
+    @register_custom_op(
+        "flashinfer::fast_topk_clusters_fused", mutates_args=("indices",)
+    )
     def _fast_topk_clusters_fused(
         logits: torch.Tensor,
         histogram: torch.Tensor,
@@ -88,7 +105,9 @@ def get_mqa_histogram_module():
         seq_lens: torch.Tensor,
         pdl_enabled: bool,
     ) -> None:
-        module.fast_topk_clusters_fused(logits, histogram, indices, seq_lens, pdl_enabled)
+        module.fast_topk_clusters_fused(
+            logits, histogram, indices, seq_lens, pdl_enabled
+        )
 
     @register_fake_op("flashinfer::fast_topk_clusters_fused")
     def _fake_fast_topk_clusters_fused(
@@ -131,7 +150,9 @@ def get_mqa_histogram_module():
         sm_map: torch.Tensor,
         sm_multiple: int,
     ) -> None:
-        module.mqa_logits(q, k_cache, weights, seq_lens, block_table, logits, sm_map, sm_multiple)
+        module.mqa_logits(
+            q, k_cache, weights, seq_lens, block_table, logits, sm_map, sm_multiple
+        )
 
     @register_fake_op("flashinfer::mqa_logits")
     def _fake_mqa_logits(
@@ -146,7 +167,9 @@ def get_mqa_histogram_module():
     ) -> None:
         pass
 
-    @register_custom_op("flashinfer::mqa_logits_fused", mutates_args=("logits", "histogram"))
+    @register_custom_op(
+        "flashinfer::mqa_logits_fused", mutates_args=("logits", "histogram")
+    )
     def _mqa_logits_fused(
         q: torch.Tensor,
         k_cache: torch.Tensor,
@@ -160,8 +183,16 @@ def get_mqa_histogram_module():
         pdl_enabled: bool,
     ) -> None:
         module.mqa_logits_fused(
-            q, k_cache, weights, seq_lens, block_table,
-            logits, histogram, sm_map, sm_multiple, pdl_enabled,
+            q,
+            k_cache,
+            weights,
+            seq_lens,
+            block_table,
+            logits,
+            histogram,
+            sm_map,
+            sm_multiple,
+            pdl_enabled,
         )
 
     @register_fake_op("flashinfer::mqa_logits_fused")
@@ -190,7 +221,9 @@ def get_mqa_histogram_module():
 
 
 @flashinfer_api
-def get_mqa_metadata(seq_lens: torch.Tensor, num_sms: Optional[int] = None) -> torch.Tensor:
+def get_mqa_metadata(
+    seq_lens: torch.Tensor, num_sms: Optional[int] = None
+) -> torch.Tensor:
     """Compute SM mapping metadata for MQA load balancing.
 
     Args:
@@ -201,7 +234,9 @@ def get_mqa_metadata(seq_lens: torch.Tensor, num_sms: Optional[int] = None) -> t
         sm_map: [num_logical_sms, 4] int32 CUDA tensor.
     """
     if num_sms is None:
-        num_sms = torch.cuda.get_device_properties(seq_lens.device).multi_processor_count
+        num_sms = torch.cuda.get_device_properties(
+            seq_lens.device
+        ).multi_processor_count
     return get_mqa_histogram_module().get_mqa_metadata(seq_lens, num_sms)
 
 
@@ -231,7 +266,9 @@ def mqa_topk_indexer_non_fused(
         (indices, logits): indices [batch, 2048] int32, logits [batch, max_model_len] float32.
     """
     batch_size = q.shape[0]
-    logits = torch.empty(batch_size, max_model_len, device=q.device, dtype=torch.float32)
+    logits = torch.empty(
+        batch_size, max_model_len, device=q.device, dtype=torch.float32
+    )
     indices = torch.empty(batch_size, 2048, device=q.device, dtype=torch.int32)
     if sm_map is None:
         sm_map = get_mqa_metadata(seq_lens)
@@ -274,7 +311,9 @@ def mqa_topk_indexer(
     """
     batch_size = q.shape[0]
     histogram = torch.zeros(batch_size, 256, device=q.device, dtype=torch.int32)
-    logits = torch.empty(batch_size, max_model_len, device=q.device, dtype=torch.float32)
+    logits = torch.empty(
+        batch_size, max_model_len, device=q.device, dtype=torch.float32
+    )
     indices = torch.empty(batch_size, 2048, device=q.device, dtype=torch.int32)
     if sm_map is None:
         sm_map = get_mqa_metadata(seq_lens)

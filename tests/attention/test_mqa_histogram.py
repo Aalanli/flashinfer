@@ -15,9 +15,12 @@ from flashinfer.utils import is_sm100a_supported
 
 torch.manual_seed(0)
 
+
 def _make_kv_cache(num_pages: int) -> torch.Tensor:
     """Build a random FP8 KV cache [num_pages, 64, 1, 132] uint8."""
-    k_index_cache_fp8 = torch.empty(num_pages, 64, 1, 132, dtype=torch.uint8, device="cuda")
+    k_index_cache_fp8 = torch.empty(
+        num_pages, 64, 1, 132, dtype=torch.uint8, device="cuda"
+    )
     kv_flat = k_index_cache_fp8.view(num_pages, -1)
     kv_flat[:, : 64 * 128].view(torch.float8_e4m3fn).copy_(
         torch.randn(num_pages, 64 * 128, dtype=torch.float32, device="cuda").to(
@@ -37,7 +40,9 @@ def _make_dsa_test_data(batch_size: int, seq_len_range):
         (q, k_cache, weights, seq_lens, block_table)
     """
     lo, hi = seq_len_range
-    seq_lens = torch.randint(lo, hi + 1, (batch_size,), dtype=torch.int32, device="cuda")
+    seq_lens = torch.randint(
+        lo, hi + 1, (batch_size,), dtype=torch.int32, device="cuda"
+    )
     num_pages_per_seq = ((seq_lens + 64 - 1) // 64).sum().item()
     max_num_pages = int((int(seq_lens.max().item()) + 64 - 1) // 64)
     # ensure max_num_pages is divisible by 2 (kernel requirement)
@@ -48,7 +53,9 @@ def _make_dsa_test_data(batch_size: int, seq_len_range):
     )
     k_cache = _make_kv_cache(int(num_pages_per_seq))
     weights = torch.randn(batch_size, 64, dtype=torch.float32, device="cuda")
-    block_table = torch.zeros(batch_size, max_num_pages, dtype=torch.int32, device="cuda")
+    block_table = torch.zeros(
+        batch_size, max_num_pages, dtype=torch.int32, device="cuda"
+    )
 
     page_offset = 0
     for b in range(batch_size):
@@ -74,7 +81,9 @@ def _dequant_fp8_kv_cache(k_index_cache_fp8: torch.Tensor) -> torch.Tensor:
     head_dim = 128
     kv_flat = k.view(num_pages, page_size * 132)
     fp8_bytes = kv_flat[:, : page_size * head_dim].contiguous()
-    fp8_tensor = fp8_bytes.view(num_pages, page_size, head_dim).view(torch.float8_e4m3fn)
+    fp8_tensor = fp8_bytes.view(num_pages, page_size, head_dim).view(
+        torch.float8_e4m3fn
+    )
     fp8_float = fp8_tensor.to(torch.float32)
     scale_bytes = kv_flat[:, page_size * head_dim :].contiguous()
     scale = scale_bytes.view(num_pages, page_size, 4).view(torch.float32)

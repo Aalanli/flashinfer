@@ -1,13 +1,14 @@
 
 
-#include <flashinfer/mqa_histogram/common.cuh>
-#include <cassert>
 #include <cooperative_groups.h>
+
+#include <cassert>
+#include <flashinfer/mqa_histogram/common.cuh>
 
 namespace cg = cooperative_groups;
 constexpr int TopK = 2048;
 
-__device__ __forceinline__ int cum_sum(int *s_hist_buf) {
+__device__ __forceinline__ int cum_sum(int* s_hist_buf) {
   constexpr int RADIX = 256;
   const int warp_idx = threadIdx.x / 32;
 
@@ -22,8 +23,7 @@ __device__ __forceinline__ int cum_sum(int *s_hist_buf) {
   }
   __syncthreads();
   if (threadIdx.x < 32) {
-    int cum_val =
-        InclusiveWarpDownScan<8>(threadIdx.x < 8 ? reduce_buf[threadIdx.x] : 0);
+    int cum_val = InclusiveWarpDownScan<8>(threadIdx.x < 8 ? reduce_buf[threadIdx.x] : 0);
     __syncwarp();
     if (threadIdx.x < 8) {
       reduce_buf[threadIdx.x] = cum_val;
@@ -37,19 +37,16 @@ __device__ __forceinline__ int cum_sum(int *s_hist_buf) {
 }
 
 template <int NumBlocks, int Threads, int UnRollFactor, typename F>
-__device__ __forceinline__ void run_vectorized_v2(const float2 *logits,
-                                                  const int seq_len,
+__device__ __forceinline__ void run_vectorized_v2(const float2* logits, const int seq_len,
                                                   const int block_id, F f) {
-
   constexpr int ElemPerBlock = Threads;
   constexpr int GridStride = NumBlocks * ElemPerBlock;
 
   for (int t = 0; t < seq_len / (2 * GridStride * UnRollFactor); t++) {
 #pragma unroll
     for (int j = 0; j < UnRollFactor; j++) {
-
-      int offset = t * GridStride * UnRollFactor + j * GridStride +
-                   block_id * ElemPerBlock + threadIdx.x;
+      int offset =
+          t * GridStride * UnRollFactor + j * GridStride + block_id * ElemPerBlock + threadIdx.x;
       float2 val = logits[offset];
       f(val.x, offset * 2);
       f(val.y, offset * 2 + 1);
@@ -58,19 +55,16 @@ __device__ __forceinline__ void run_vectorized_v2(const float2 *logits,
 }
 
 template <int NumBlocks, int Threads, int UnRollFactor, typename F>
-__device__ __forceinline__ void run_vectorized_v4(const float4 *logits,
-                                                  const int seq_len,
+__device__ __forceinline__ void run_vectorized_v4(const float4* logits, const int seq_len,
                                                   const int block_id, F f) {
-
   constexpr int ElemPerBlock = Threads;
   constexpr int GridStride = NumBlocks * ElemPerBlock;
 
   for (int t = 0; t < seq_len / (4 * GridStride * UnRollFactor); t++) {
 #pragma unroll
     for (int j = 0; j < UnRollFactor; j++) {
-
-      int offset = t * GridStride * UnRollFactor + j * GridStride +
-                   block_id * ElemPerBlock + threadIdx.x;
+      int offset =
+          t * GridStride * UnRollFactor + j * GridStride + block_id * ElemPerBlock + threadIdx.x;
       float4 val = logits[offset];
       f(val.x, offset * 4);
       f(val.y, offset * 4 + 1);
@@ -80,24 +74,18 @@ __device__ __forceinline__ void run_vectorized_v4(const float4 *logits,
   }
 }
 template <int NumBlocks, int Threads, int UnrollFactor, int VecType, typename F>
-__device__ __forceinline__ void run_vectorized(const float *logits,
-                                               const int seq_len,
+__device__ __forceinline__ void run_vectorized(const float* logits, const int seq_len,
                                                const int block_id, F f) {
-
   static_assert(VecType == 2 || VecType == 4, "expected VecType == 2 or 4");
   if (VecType == 2) {
-    run_vectorized_v2<NumBlocks, Threads, UnrollFactor>((float2 *)logits,
-                                                        seq_len, block_id, f);
+    run_vectorized_v2<NumBlocks, Threads, UnrollFactor>((float2*)logits, seq_len, block_id, f);
   } else if (VecType == 4) {
-
-    run_vectorized_v4<NumBlocks, Threads, UnrollFactor>((float4 *)logits,
-                                                        seq_len, block_id, f);
+    run_vectorized_v4<NumBlocks, Threads, UnrollFactor>((float4*)logits, seq_len, block_id, f);
   }
 
   constexpr int ElemPerBlock = VecType * Threads;
   constexpr int GridStride = NumBlocks * ElemPerBlock;
-  int leftover_offset =
-      (seq_len / (GridStride * UnrollFactor)) * GridStride * UnrollFactor;
+  int leftover_offset = (seq_len / (GridStride * UnrollFactor)) * GridStride * UnrollFactor;
   for (int i = leftover_offset + threadIdx.x + block_id * Threads; i < seq_len;
        i += Threads * NumBlocks) {
     f(logits[i], i);
@@ -106,8 +94,8 @@ __device__ __forceinline__ void run_vectorized(const float *logits,
 
 template <int NClusters>
 __device__ __forceinline__ void fast_topk_cuda_v4(
-    const float *__restrict__ logits, // Input logits [max_num_pages * 64]
-    int *__restrict__ output_indices, // Output top-k indices [TopK]
+    const float* __restrict__ logits,  // Input logits [max_num_pages * 64]
+    int* __restrict__ output_indices,  // Output top-k indices [TopK]
     const int seq_len, const int num_cached) {
   constexpr int RADIX = 256;
 
@@ -124,14 +112,12 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
   // cache 2 * num_cached uint16_t (indices), 2 * num_cached float (logits),
   // TopK uint16_t (final indices)
   extern __shared__ uint8_t shared_cache[];
-  alignas(128) __shared__ int
-      shared_final_idx_count; // number of topk indices in s_topk_inds
-  alignas(128)
-      __shared__ int shared_num_cached_count[2]; // number of cached indices
+  alignas(128) __shared__ int shared_final_idx_count;      // number of topk indices in s_topk_inds
+  alignas(128) __shared__ int shared_num_cached_count[2];  // number of cached indices
   alignas(128) __shared__ int shared_threshold_bin;
-  uint32_t *s_cached_logit_bits = (uint32_t *)shared_cache;
-  int *s_cached_indices = (int *)(2 * num_cached + s_cached_logit_bits);
-  int *s_topk_inds = (int *)(2 * num_cached + s_cached_indices);
+  uint32_t* s_cached_logit_bits = (uint32_t*)shared_cache;
+  int* s_cached_indices = (int*)(2 * num_cached + s_cached_logit_bits);
+  int* s_topk_inds = (int*)(2 * num_cached + s_cached_indices);
 
   auto cluster = cg::this_cluster();
   const int block_id = cluster.block_rank();
@@ -140,7 +126,7 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
   constexpr bool RUN_PHASE1 = true;
   constexpr bool ENABLE_CLUSTER_SAFETY = true;
 
-  auto get_threshold_bin = [&](int hist_idx, int &k_remaining) {
+  auto get_threshold_bin = [&](int hist_idx, int& k_remaining) {
     __syncthreads();
     // first reduce cum sum locally
     int cum_val = cum_sum(shared_hist[hist_idx]);
@@ -148,14 +134,13 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
       if (radix_thread) {
         shared_hist[hist_idx][threadIdx.x] = cum_val;
       }
-      cluster.sync(); // now first block in cluster has its local cum sum
+      cluster.sync();  // now first block in cluster has its local cum sum
 
       if (radix_thread) {
 #pragma unroll
         for (int cl = 0; cl < NClusters - 1; cl++) {
-          cum_val +=
-              cluster.map_shared_rank(&shared_hist[hist_idx][threadIdx.x],
-                                      (cl + block_id + 1) % NClusters)[0];
+          cum_val += cluster.map_shared_rank(&shared_hist[hist_idx][threadIdx.x],
+                                             (cl + block_id + 1) % NClusters)[0];
         }
         shared_hist[2][threadIdx.x] = cum_val;
       }
@@ -167,8 +152,7 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
 
     __syncthreads();
 
-    int cum_val1 =
-        threadIdx.x < RADIX - 1 ? shared_hist[2][threadIdx.x + 1] : 0;
+    int cum_val1 = threadIdx.x < RADIX - 1 ? shared_hist[2][threadIdx.x + 1] : 0;
 
     if (radix_thread && cum_val > k_remaining && cum_val1 <= k_remaining) {
       shared_threshold_bin = threadIdx.x;
@@ -199,8 +183,7 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
 
   __syncthreads();
 
-  for (int i = threadIdx.x + block_id * 1024; i < seq_len;
-       i += 1024 * NClusters) {
+  for (int i = threadIdx.x + block_id * 1024; i < seq_len; i += 1024 * NClusters) {
     float res = logits[i];
     auto bin = convert_to_uint32_v2(res) >> 24 & 0xff;
     atomicAdd(shared_hist[0] + bin, 1);
@@ -231,15 +214,13 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
       }
     };
     if (ENABLE_CLUSTER_SAFETY && NClusters > 1) {
-
-      cluster.barrier_arrive(); // arrive at this point to signal that we are
-                                // done with shared_hist[0], which we need in
-                                // distributed shared memory to communicate
-                                // histograms within the cluster
+      cluster.barrier_arrive();  // arrive at this point to signal that we are
+                                 // done with shared_hist[0], which we need in
+                                 // distributed shared memory to communicate
+                                 // histograms within the cluster
     }
 
-    run_vectorized<NClusters, 1024, 4, 2>(logits, seq_len, block_id,
-                                          compute_phase1);
+    run_vectorized<NClusters, 1024, 4, 2>(logits, seq_len, block_id, compute_phase1);
 
     // // each block in a cluster gets a partition in global
     // for (int i = threadIdx.x + block_id * 1024; i < seq_len;
@@ -274,10 +255,9 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
     // ^ 1 clear the next stage to prepare
 
     if (ENABLE_CLUSTER_SAFETY && NClusters > 1) {
-      cluster
-          .barrier_wait(); // wait because we need to clear shared_hist for this
-                           // next histogram; there is a dependency between
-                           // get_threshold_bin and phase ^ 1 of the histogram
+      cluster.barrier_wait();  // wait because we need to clear shared_hist for this
+                               // next histogram; there is a dependency between
+                               // get_threshold_bin and phase ^ 1 of the histogram
     }
     if (radix_thread) {
       shared_hist[phase ^ 1][threadIdx.x] = 0;
@@ -288,9 +268,9 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
     // get_threshold_bin synchronizes the block
     const int threshold_bin = get_threshold_bin(phase, top_k_remaining);
     if (ENABLE_CLUSTER_SAFETY && NClusters > 1 && t < 3) {
-      cluster.barrier_arrive(); // same reasoning as above, for the last
-                                // iteration there is no dependency because no
-                                // more calls to get_threshold_bin
+      cluster.barrier_arrive();  // same reasoning as above, for the last
+                                 // iteration there is no dependency because no
+                                 // more calls to get_threshold_bin
     }
     int buf_len = min(num_cached, shared_num_cached_count[phase ^ 1]);
     if (DEBUG && threadIdx.x == 0) {
@@ -316,8 +296,7 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
         if (cached_offset < num_cached) {
           s_cached_indices[cached_offset + phase * num_cached] = cached_idx;
           s_cached_logit_bits[cached_offset + phase * num_cached] = bits;
-          atomicAdd(
-              shared_hist[phase ^ 1] + (bits >> (24 - (t + 1) * 8) & 0xff), 1);
+          atomicAdd(shared_hist[phase ^ 1] + (bits >> (24 - (t + 1) * 8) & 0xff), 1);
         }
       }
     }
@@ -348,12 +327,11 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
   // s_topk_inds[0:shared_final_idx_count] contains the local
   // slice.
   if (NClusters > 1) {
-
     int topk_start = 0;
     int topk_num = shared_final_idx_count;
 
-    cluster.sync(); // sync to get the shared_final_idx_count across CTAs in
-                    // current cluster
+    cluster.sync();  // sync to get the shared_final_idx_count across CTAs in
+                     // current cluster
 
     // __shared__ int shared_topk_start;
     // if (threadIdx.x == 0) {
@@ -366,8 +344,7 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
     // topk_start = shared_topk_start;
     if (block_id > 0) {
       if (threadIdx.x == 0) {
-        topk_start += atomicAdd(
-            cluster.map_shared_rank(&shared_final_idx_count, 0), topk_num);
+        topk_start += atomicAdd(cluster.map_shared_rank(&shared_final_idx_count, 0), topk_num);
         shared_final_idx_count = topk_start;
       }
       __syncthreads();
@@ -375,8 +352,7 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
     }
 
     if (DEBUG && threadIdx.x == 0) {
-      printf("block rank %d, topk start %d, topk num %d\n", block_id,
-             topk_start, topk_num);
+      printf("block rank %d, topk start %d, topk num %d\n", block_id, topk_start, topk_num);
     }
     for (int i = threadIdx.x; i < min(TopK, topk_num); i += 1024) {
       if (i + topk_start < TopK) {
@@ -394,17 +370,14 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
 
 template <int NClusters>
 __global__ __launch_bounds__(1024) void __cluster_dims__(NClusters, 1, 1)
-    fast_topk_clusters_kernel(
-        const float *__restrict__ logits, // [batchsize, max_num_pages * 64]
-        int *__restrict__ output_indices, int *__restrict__ seq_lens,
-        int logit_stride, int indices_stride, int num_cached) {
-
+    fast_topk_clusters_kernel(const float* __restrict__ logits,  // [batchsize, max_num_pages * 64]
+                              int* __restrict__ output_indices, int* __restrict__ seq_lens,
+                              int logit_stride, int indices_stride, int num_cached) {
   int logit_offset = blockIdx.x / NClusters * logit_stride;
   int ind_offset = blockIdx.x / NClusters * indices_stride;
   int seq_len = seq_lens[blockIdx.x / NClusters];
   if (seq_len <= TopK) {
-    for (int i = threadIdx.x + (blockIdx.x % NClusters) * 1024; i < TopK;
-         i += 1024 * NClusters) {
+    for (int i = threadIdx.x + (blockIdx.x % NClusters) * 1024; i < TopK; i += 1024 * NClusters) {
       if (i < seq_len) {
         output_indices[ind_offset + i] = i;
       } else {
@@ -413,22 +386,17 @@ __global__ __launch_bounds__(1024) void __cluster_dims__(NClusters, 1, 1)
     }
 
   } else {
-    fast_topk_cuda_v4<NClusters>(logits + logit_offset,
-                                 output_indices + ind_offset, seq_len,
+    fast_topk_cuda_v4<NClusters>(logits + logit_offset, output_indices + ind_offset, seq_len,
                                  num_cached);
   }
 }
 
-extern "C" void launch_fast_topk_clusters(const float *logits, int *indices,
-                                          int *seq_lens, int batch_size,
-                                          int logit_stride, int indices_stride,
-                                          int num_cached, int num_clusters,
-                                          cudaStream_t stream) {
-
+extern "C" void launch_fast_topk_clusters(const float* logits, int* indices, int* seq_lens,
+                                          int batch_size, int logit_stride, int indices_stride,
+                                          int num_cached, int num_clusters, cudaStream_t stream) {
   int extern_shared_mem =
       (num_cached * 2 * sizeof(float) + num_cached * 2 * sizeof(int) +
-       TopK *
-           sizeof(int)); // 2 * num_cached float, 2 * num_cached int, topk int
+       TopK * sizeof(int));  // 2 * num_cached float, 2 * num_cached int, topk int
 
   setup_kernel_smem_once<fast_topk_clusters_kernel<1>, 4096 * 16 + 2048 * 4>();
 
@@ -438,35 +406,25 @@ extern "C" void launch_fast_topk_clusters(const float *logits, int *indices,
   setup_kernel_smem_once<fast_topk_clusters_kernel<16>, 4096 * 16 + 2048 * 4>();
   setup_non_portable_clusters_once<fast_topk_clusters_kernel<16>>();
   switch (num_clusters) {
-  case 1:
-    fast_topk_clusters_kernel<1>
-        <<<batch_size, 1024, extern_shared_mem, stream>>>(
-            logits, indices, seq_lens, logit_stride, indices_stride,
-            num_cached);
-    break;
-  case 2:
-    fast_topk_clusters_kernel<2>
-        <<<batch_size * 2, 1024, extern_shared_mem, stream>>>(
-            logits, indices, seq_lens, logit_stride, indices_stride,
-            num_cached);
-    break;
-  case 4:
-    fast_topk_clusters_kernel<4>
-        <<<batch_size * 4, 1024, extern_shared_mem, stream>>>(
-            logits, indices, seq_lens, logit_stride, indices_stride,
-            num_cached);
-    break;
-  case 8:
-    fast_topk_clusters_kernel<8>
-        <<<batch_size * 8, 1024, extern_shared_mem, stream>>>(
-            logits, indices, seq_lens, logit_stride, indices_stride,
-            num_cached);
-    break;
-  case 16:
-    fast_topk_clusters_kernel<16>
-        <<<batch_size * 16, 1024, extern_shared_mem, stream>>>(
-            logits, indices, seq_lens, logit_stride, indices_stride,
-            num_cached);
-    break;
+    case 1:
+      fast_topk_clusters_kernel<1><<<batch_size, 1024, extern_shared_mem, stream>>>(
+          logits, indices, seq_lens, logit_stride, indices_stride, num_cached);
+      break;
+    case 2:
+      fast_topk_clusters_kernel<2><<<batch_size * 2, 1024, extern_shared_mem, stream>>>(
+          logits, indices, seq_lens, logit_stride, indices_stride, num_cached);
+      break;
+    case 4:
+      fast_topk_clusters_kernel<4><<<batch_size * 4, 1024, extern_shared_mem, stream>>>(
+          logits, indices, seq_lens, logit_stride, indices_stride, num_cached);
+      break;
+    case 8:
+      fast_topk_clusters_kernel<8><<<batch_size * 8, 1024, extern_shared_mem, stream>>>(
+          logits, indices, seq_lens, logit_stride, indices_stride, num_cached);
+      break;
+    case 16:
+      fast_topk_clusters_kernel<16><<<batch_size * 16, 1024, extern_shared_mem, stream>>>(
+          logits, indices, seq_lens, logit_stride, indices_stride, num_cached);
+      break;
   }
 }

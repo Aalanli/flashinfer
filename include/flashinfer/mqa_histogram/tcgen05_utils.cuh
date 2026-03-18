@@ -1,81 +1,81 @@
 #pragma once
-#include <cstdint>
 #include <cudaTypedefs.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 
+#include <cstdint>
+
 // https://github.com/NVIDIA/cutlass/blob/v4.2.1/include/cute/arch/cluster_sm90.hpp#L180
 __device__ inline uint32_t elect_sync() {
   uint32_t pred = 0;
-  asm volatile("{\n\t"
-               ".reg .pred %%px;\n\t"
-               "elect.sync _|%%px, %1;\n\t"
-               "@%%px mov.s32 %0, 1;\n\t"
-               "}"
-               : "+r"(pred)
-               : "r"(0xFFFFFFFF));
+  asm volatile(
+      "{\n\t"
+      ".reg .pred %%px;\n\t"
+      "elect.sync _|%%px, %1;\n\t"
+      "@%%px mov.s32 %0, 1;\n\t"
+      "}"
+      : "+r"(pred)
+      : "r"(0xFFFFFFFF));
   return pred;
 }
 
 template <typename T>
-__device__ inline void tma_1d_gmem2smem(const T *src, T *dst, int num_bytes,
-                                        uint64_t *mbar) {
-  asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes "
-               "[%0], [%1], %2, [%3];" ::"l"(dst),
-               "l"(src), "r"(num_bytes), "l"(mbar)
-               : "memory");
+__device__ inline void tma_1d_gmem2smem(const T* src, T* dst, int num_bytes, uint64_t* mbar) {
+  asm volatile(
+      "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes "
+      "[%0], [%1], %2, [%3];" ::"l"(dst),
+      "l"(src), "r"(num_bytes), "l"(mbar)
+      : "memory");
 }
 
-__device__ inline void tma_2d_gmem2smem(int dst, const void *tmap_ptr, int x,
-                                        int y, int mbar_addr) {
-  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_"
-               "tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst),
-               "l"(tmap_ptr), "r"(x), "r"(y), "r"(mbar_addr)
-               : "memory");
+__device__ inline void tma_2d_gmem2smem(int dst, const void* tmap_ptr, int x, int y,
+                                        int mbar_addr) {
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_"
+      "tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst),
+      "l"(tmap_ptr), "r"(x), "r"(y), "r"(mbar_addr)
+      : "memory");
 }
 
 template <typename T>
-__device__ inline void tma_3d_gmem2smem(T *dst, const void *tmap_ptr, int x,
-                                        int y, int z, uint64_t *mbar_addr) {
+__device__ inline void tma_3d_gmem2smem(T* dst, const void* tmap_ptr, int x, int y, int z,
+                                        uint64_t* mbar_addr) {
   // when CTA_GROUP=1, we can use .shared::cta instead.
   // but .shared::cluster doesn't seem to be slower, so always use it
   // unconditionally here. .cta_group::2 allows mbar_addr and dst to be in
   // different CTA's smem.
-  asm volatile("cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_"
-               "tx::bytes.cta_group::1 "
-               "[%0], [%1, {%2, %3, %4}], [%5];" ::"l"(dst),
-               "l"(tmap_ptr), "r"(x), "r"(y), "r"(z), "l"(mbar_addr)
-               : "memory");
+  asm volatile(
+      "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_"
+      "tx::bytes.cta_group::1 "
+      "[%0], [%1, {%2, %3, %4}], [%5];" ::"l"(dst),
+      "l"(tmap_ptr), "r"(x), "r"(y), "r"(z), "l"(mbar_addr)
+      : "memory");
 }
 
-__device__ inline void tcgen05_mma_f8(int taddr, uint64_t a_desc,
-                                      uint64_t b_desc, uint32_t i_desc,
+__device__ inline void tcgen05_mma_f8(int taddr, uint64_t a_desc, uint64_t b_desc, uint32_t i_desc,
                                       int enable_input_d) {
-
   // no block shifts version
-  asm volatile("{\n\t"
-               ".reg .pred p;\n\t" // predicate register enable-input-d
-               "setp.ne.b32 p, %4, 0;\n\t"
-               "tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], %1, %2, %3, p;\n\t"
-               "}" ::"r"(taddr),
-               "l"(a_desc), "l"(b_desc), "r"(i_desc), "r"(enable_input_d));
+  asm volatile(
+      "{\n\t"
+      ".reg .pred p;\n\t"  // predicate register enable-input-d
+      "setp.ne.b32 p, %4, 0;\n\t"
+      "tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], %1, %2, %3, p;\n\t"
+      "}" ::"r"(taddr),
+      "l"(a_desc), "l"(b_desc), "r"(i_desc), "r"(enable_input_d));
 }
-__device__ inline constexpr uint64_t desc_encode(uint64_t x) {
-  return (x & 0x3'FFFFULL) >> 4ULL;
-}
+__device__ inline constexpr uint64_t desc_encode(uint64_t x) { return (x & 0x3'FFFFULL) >> 4ULL; }
 
 __device__ inline void tcgen05_ld_16x256b(int addr, float (&tmp)[8]) {
-
-  asm volatile("tcgen05.ld.sync.aligned.16x256b.x2.b32 {%0, %1, %2, %3, %4, "
-               "%5, %6, %7}, [%8];"
-               : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]),
-                 "=f"(tmp[4]), "=f"(tmp[5]), "=f"(tmp[6]), "=f"(tmp[7])
-               : "r"(addr));
+  asm volatile(
+      "tcgen05.ld.sync.aligned.16x256b.x2.b32 {%0, %1, %2, %3, %4, "
+      "%5, %6, %7}, [%8];"
+      : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]), "=f"(tmp[4]), "=f"(tmp[5]),
+        "=f"(tmp[6]), "=f"(tmp[7])
+      : "r"(addr));
   asm volatile("tcgen05.wait::ld.sync.aligned;");
 }
 
 __device__ inline void tcgen05_ld_32x32b_x2(int addr, float (&tmp)[2]) {
-
   asm volatile("tcgen05.ld.sync.aligned.32x32b.x2.b32 {%0, %1}, [%2];"
                : "=f"(tmp[0]), "=f"(tmp[1])
                : "r"(addr));
@@ -83,7 +83,6 @@ __device__ inline void tcgen05_ld_32x32b_x2(int addr, float (&tmp)[2]) {
 }
 
 __device__ inline void tcgen05_ld_32x32b_x4(int addr, float (&tmp)[4]) {
-
   asm volatile("tcgen05.ld.sync.aligned.32x32b.x4.b32 {%0, %1, %2, %3}, [%4];"
                : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3])
                : "r"(addr));
@@ -91,71 +90,62 @@ __device__ inline void tcgen05_ld_32x32b_x4(int addr, float (&tmp)[4]) {
 }
 
 __device__ inline void tcgen05_ld_32x32b_x8(int addr, float (&tmp)[8]) {
-
   asm volatile(
       "tcgen05.ld.sync.aligned.32x32b.x8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, "
       "[%8];"
-      : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]), "=f"(tmp[4]),
-        "=f"(tmp[5]), "=f"(tmp[6]), "=f"(tmp[7])
+      : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]), "=f"(tmp[4]), "=f"(tmp[5]),
+        "=f"(tmp[6]), "=f"(tmp[7])
       : "r"(addr));
   asm volatile("tcgen05.wait::ld.sync.aligned;");
 }
 
 __device__ inline void tcgen05_ld_32x32b_x16(int addr, float (&tmp)[16]) {
-
-  asm volatile("tcgen05.ld.sync.aligned.32x32b.x16.b32 {%0, %1, %2, %3, %4, %5, "
-               "%6, %7, %8, %9, %10, %11, %12, %13, %14, %15}, [%16];"
-               : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]),
-                 "=f"(tmp[4]), "=f"(tmp[5]), "=f"(tmp[6]), "=f"(tmp[7]),
-                 "=f"(tmp[8]), "=f"(tmp[9]), "=f"(tmp[10]), "=f"(tmp[11]),
-                 "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15])
-               : "r"(addr));
+  asm volatile(
+      "tcgen05.ld.sync.aligned.32x32b.x16.b32 {%0, %1, %2, %3, %4, %5, "
+      "%6, %7, %8, %9, %10, %11, %12, %13, %14, %15}, [%16];"
+      : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]), "=f"(tmp[4]), "=f"(tmp[5]),
+        "=f"(tmp[6]), "=f"(tmp[7]), "=f"(tmp[8]), "=f"(tmp[9]), "=f"(tmp[10]), "=f"(tmp[11]),
+        "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15])
+      : "r"(addr));
   asm volatile("tcgen05.wait::ld.sync.aligned;");
 }
 
 __device__ inline void tcgen05_ld_32x32b_x32(int addr, float (&tmp)[32]) {
-
-  asm volatile("tcgen05.ld.sync.aligned.32x32b.x32.b32 {%0, %1, %2, %3, %4, %5, "
-               "%6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, "
-               "%19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, "
-               "%31}, [%32];"
-               : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]),
-                 "=f"(tmp[4]), "=f"(tmp[5]), "=f"(tmp[6]), "=f"(tmp[7]),
-                 "=f"(tmp[8]), "=f"(tmp[9]), "=f"(tmp[10]), "=f"(tmp[11]),
-                 "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15]),
-                 "=f"(tmp[16]), "=f"(tmp[17]), "=f"(tmp[18]), "=f"(tmp[19]),
-                 "=f"(tmp[20]), "=f"(tmp[21]), "=f"(tmp[22]), "=f"(tmp[23]),
-                 "=f"(tmp[24]), "=f"(tmp[25]), "=f"(tmp[26]), "=f"(tmp[27]),
-                 "=f"(tmp[28]), "=f"(tmp[29]), "=f"(tmp[30]), "=f"(tmp[31])
-               : "r"(addr));
+  asm volatile(
+      "tcgen05.ld.sync.aligned.32x32b.x32.b32 {%0, %1, %2, %3, %4, %5, "
+      "%6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, "
+      "%19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, "
+      "%31}, [%32];"
+      : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]), "=f"(tmp[4]), "=f"(tmp[5]),
+        "=f"(tmp[6]), "=f"(tmp[7]), "=f"(tmp[8]), "=f"(tmp[9]), "=f"(tmp[10]), "=f"(tmp[11]),
+        "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15]), "=f"(tmp[16]), "=f"(tmp[17]),
+        "=f"(tmp[18]), "=f"(tmp[19]), "=f"(tmp[20]), "=f"(tmp[21]), "=f"(tmp[22]), "=f"(tmp[23]),
+        "=f"(tmp[24]), "=f"(tmp[25]), "=f"(tmp[26]), "=f"(tmp[27]), "=f"(tmp[28]), "=f"(tmp[29]),
+        "=f"(tmp[30]), "=f"(tmp[31])
+      : "r"(addr));
   asm volatile("tcgen05.wait::ld.sync.aligned;");
 }
 
 __device__ inline void tcgen05_ld_32x32b_x64(int addr, float (&tmp)[64]) {
-
-  asm volatile("tcgen05.ld.sync.aligned.32x32b.x64.b32 {%0, %1, %2, %3, %4, %5, "
-               "%6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, "
-               "%19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, "
-               "%31, %32, %33, %34, %35, %36, %37, %38, %39, %40, %41, %42, "
-               "%43, %44, %45, %46, %47, %48, %49, %50, %51, %52, %53, %54, "
-               "%55, %56, %57, %58, %59, %60, %61, %62, %63}, [%64];"
-               : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]),
-                 "=f"(tmp[4]), "=f"(tmp[5]), "=f"(tmp[6]), "=f"(tmp[7]),
-                 "=f"(tmp[8]), "=f"(tmp[9]), "=f"(tmp[10]), "=f"(tmp[11]),
-                 "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15]),
-                 "=f"(tmp[16]), "=f"(tmp[17]), "=f"(tmp[18]), "=f"(tmp[19]),
-                 "=f"(tmp[20]), "=f"(tmp[21]), "=f"(tmp[22]), "=f"(tmp[23]),
-                 "=f"(tmp[24]), "=f"(tmp[25]), "=f"(tmp[26]), "=f"(tmp[27]),
-                 "=f"(tmp[28]), "=f"(tmp[29]), "=f"(tmp[30]), "=f"(tmp[31]),
-                 "=f"(tmp[32]), "=f"(tmp[33]), "=f"(tmp[34]), "=f"(tmp[35]),
-                 "=f"(tmp[36]), "=f"(tmp[37]), "=f"(tmp[38]), "=f"(tmp[39]),
-                 "=f"(tmp[40]), "=f"(tmp[41]), "=f"(tmp[42]), "=f"(tmp[43]),
-                 "=f"(tmp[44]), "=f"(tmp[45]), "=f"(tmp[46]), "=f"(tmp[47]),
-                 "=f"(tmp[48]), "=f"(tmp[49]), "=f"(tmp[50]), "=f"(tmp[51]),
-                 "=f"(tmp[52]), "=f"(tmp[53]), "=f"(tmp[54]), "=f"(tmp[55]),
-                 "=f"(tmp[56]), "=f"(tmp[57]), "=f"(tmp[58]), "=f"(tmp[59]),
-                 "=f"(tmp[60]), "=f"(tmp[61]), "=f"(tmp[62]), "=f"(tmp[63])
-               : "r"(addr));
+  asm volatile(
+      "tcgen05.ld.sync.aligned.32x32b.x64.b32 {%0, %1, %2, %3, %4, %5, "
+      "%6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, "
+      "%19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, "
+      "%31, %32, %33, %34, %35, %36, %37, %38, %39, %40, %41, %42, "
+      "%43, %44, %45, %46, %47, %48, %49, %50, %51, %52, %53, %54, "
+      "%55, %56, %57, %58, %59, %60, %61, %62, %63}, [%64];"
+      : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]), "=f"(tmp[4]), "=f"(tmp[5]),
+        "=f"(tmp[6]), "=f"(tmp[7]), "=f"(tmp[8]), "=f"(tmp[9]), "=f"(tmp[10]), "=f"(tmp[11]),
+        "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15]), "=f"(tmp[16]), "=f"(tmp[17]),
+        "=f"(tmp[18]), "=f"(tmp[19]), "=f"(tmp[20]), "=f"(tmp[21]), "=f"(tmp[22]), "=f"(tmp[23]),
+        "=f"(tmp[24]), "=f"(tmp[25]), "=f"(tmp[26]), "=f"(tmp[27]), "=f"(tmp[28]), "=f"(tmp[29]),
+        "=f"(tmp[30]), "=f"(tmp[31]), "=f"(tmp[32]), "=f"(tmp[33]), "=f"(tmp[34]), "=f"(tmp[35]),
+        "=f"(tmp[36]), "=f"(tmp[37]), "=f"(tmp[38]), "=f"(tmp[39]), "=f"(tmp[40]), "=f"(tmp[41]),
+        "=f"(tmp[42]), "=f"(tmp[43]), "=f"(tmp[44]), "=f"(tmp[45]), "=f"(tmp[46]), "=f"(tmp[47]),
+        "=f"(tmp[48]), "=f"(tmp[49]), "=f"(tmp[50]), "=f"(tmp[51]), "=f"(tmp[52]), "=f"(tmp[53]),
+        "=f"(tmp[54]), "=f"(tmp[55]), "=f"(tmp[56]), "=f"(tmp[57]), "=f"(tmp[58]), "=f"(tmp[59]),
+        "=f"(tmp[60]), "=f"(tmp[61]), "=f"(tmp[62]), "=f"(tmp[63])
+      : "r"(addr));
   asm volatile("tcgen05.wait::ld.sync.aligned;");
 }
 
