@@ -166,6 +166,10 @@ from .sampling import top_p_renorm_probs as top_p_renorm_probs
 from .sampling import top_p_sampling_from_probs as top_p_sampling_from_probs
 from . import topk as topk
 from .topk import top_k as top_k
+from . import mqa_histogram as mqa_histogram
+from .mqa_histogram import get_mqa_metadata as get_mqa_metadata
+from .mqa_histogram import mqa_topk_indexer as mqa_topk_indexer
+from .mqa_histogram import mqa_topk_indexer_non_fused as mqa_topk_indexer_non_fused
 from .topk import top_k_page_table_transform as top_k_page_table_transform
 from .topk import top_k_ragged_transform as top_k_ragged_transform
 from .sparse import BlockSparseAttentionWrapper as BlockSparseAttentionWrapper

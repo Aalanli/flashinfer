@@ -2,7 +2,8 @@
 Benchmark for Top-K operations including:
 - top_k: Basic radix-based top-k selection
 - top_k_page_table_transform: Fused top-k + page table gather (for sparse attention)
-- top_k_ragged_transform: Fused top-k + offset addition (for sparse attention)
+- top_k_ragged_transform: Fused top-k + ragged index transform (for sparse attention)
+- dsv3_topk: DeepSeek v3 sparse-attention top-K shapes using fast_topk_clusters
 
 Optional comparison with SGLang's sgl_kernel implementation.
 """
@@ -190,6 +191,72 @@ def bench_ragged_transform(
     return result
 
 
+def bench_dsv3_topk(
+    batch_size: int,
+    seq_len: int,
+    compare_sglang: bool = False,
+) -> dict:
+    """Benchmark top-K for DeepSeek v3 sparse-attention shapes (k=2048).
+
+    Uses flashinfer's fast_topk_clusters kernel (histogram-driven radix top-K
+    with variable-length sequence support) and compares against flashinfer's
+    generic top_k and, optionally, SGLang's fast_topk_v2.
+
+    Inputs match the MQA indexer: logits [batch, seq_len] float32 with
+    seq_lens [batch] int32 all set to seq_len.
+    """
+    from flashinfer.mqa_histogram import get_mqa_histogram_module
+
+    k = 2048
+    ops = get_mqa_histogram_module()
+
+    logits = torch.empty(batch_size, seq_len, device="cuda", dtype=torch.float32)
+    logits.uniform_(-1.0, 1.0)
+    seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.empty(batch_size, k, dtype=torch.int32, device="cuda")
+
+    # fast_topk_clusters: histogram-driven radix top-K with variable-length support
+    measurements = bench_gpu_time(
+        lambda: ops.fast_topk_clusters(logits, indices, seq_lens, 4096, 8),
+        enable_cupti=True,
+        dry_run_iters=10,
+        repeat_iters=100,
+    )
+    ftc_ms = np.median(measurements)
+
+    result = {
+        "batch_size": batch_size,
+        "seq_len": seq_len,
+        "k": k,
+        "fast_topk_clusters_us": ftc_ms * 1e3,
+    }
+
+    # flashinfer top_k: operates on the full padded tensor (no variable-length support)
+    measurements = bench_gpu_time(
+        lambda: flashinfer.top_k(logits, k),
+        enable_cupti=True,
+        dry_run_iters=10,
+        repeat_iters=100,
+    )
+    fi_ms = np.median(measurements)
+    result["flashinfer_top_k_us"] = fi_ms * 1e3
+    result["speedup_vs_flashinfer"] = fi_ms / ftc_ms
+
+    # SGLang fast_topk_v2: also supports variable-length via lengths tensor
+    if compare_sglang and HAS_SGL_KERNEL:
+        measurements = bench_gpu_time(
+            lambda: sgl_kernel.fast_topk_v2(logits, seq_lens, k, row_starts=None),
+            enable_cupti=True,
+            dry_run_iters=10,
+            repeat_iters=100,
+        )
+        sg_ms = np.median(measurements)
+        result["sglang_us"] = sg_ms * 1e3
+        result["speedup_vs_sglang"] = sg_ms / ftc_ms
+
+    return result
+
+
 def parse_dtype(dtype_str: str) -> torch.dtype:
     """Parse dtype string to torch.dtype."""
     dtype_map = {
@@ -214,7 +281,7 @@ def main():
     )
     parser.add_argument(
         "--op",
-        choices=["all", "top_k", "page_table", "ragged"],
+        choices=["all", "top_k", "page_table", "ragged", "dsv3_topk"],
         default="all",
         help="Which operation to benchmark",
     )
@@ -422,6 +489,50 @@ def main():
                             torch.cuda.empty_cache()
                         else:
                             raise
+
+
+    if args.op in ["all", "dsv3_topk"]:
+        # DeepSeek v3 sparse-attention shapes: long contexts, moderate batch sizes, k=2048
+        dsv3_batch_sizes = [1, 2, 4, 32, 64]
+        dsv3_seq_lens = [1024, 4096, 8192, 32768, 40960]
+
+        print("\n" + "=" * 100)
+        print("dsv3_topk: DeepSeek v3 sparse-attention top-K shapes (k=2048, float32)")
+        print("  fast_topk_clusters: histogram-driven radix top-K (variable-length aware)")
+        print("  flashinfer top_k:   generic radix top-K (padded input)")
+        if args.compare_sglang:
+            print("  SGLang fast_topk_v2: variable-length aware (requires sgl_kernel)")
+        print("=" * 100)
+
+        header = f"{'batch':>6} {'seq_len':>10} | {'fast_topk_clusters':>20} {'flashinfer_top_k':>18} {'Speedup':>10}"
+        if args.compare_sglang:
+            header += f" {'SGLang':>12} {'Speedup':>10}"
+        print(header)
+        print("-" * (80 if not args.compare_sglang else 102))
+
+        for batch_size in dsv3_batch_sizes:
+            for seq_len in dsv3_seq_lens:
+                try:
+                    result = bench_dsv3_topk(
+                        batch_size,
+                        seq_len,
+                        compare_sglang=args.compare_sglang,
+                    )
+                    line = (
+                        f"{result['batch_size']:>6} {result['seq_len']:>10} | "
+                        f"{result['fast_topk_clusters_us']:>18.2f}us "
+                        f"{result['flashinfer_top_k_us']:>16.2f}us "
+                        f"{result['speedup_vs_flashinfer']:>9.2f}x"
+                    )
+                    if "sglang_us" in result:
+                        line += f" {result['sglang_us']:>10.2f}us {result['speedup_vs_sglang']:>9.2f}x"
+                    print(line)
+                except RuntimeError as e:
+                    if "out of memory" in str(e):
+                        print(f"{batch_size:>6} {seq_len:>10} | OOM")
+                        torch.cuda.empty_cache()
+                    else:
+                        raise
 
 
 if __name__ == "__main__":
