@@ -22,7 +22,12 @@ import torch
 
 from .api_logging import flashinfer_api
 from .jit.mqa_histogram import gen_mqa_histogram_module
-from .utils import register_custom_op, register_fake_op
+from .utils import (
+    backend_requirement,
+    register_custom_op,
+    register_fake_op,
+    supported_compute_capability,
+)
 
 
 @functools.cache
@@ -207,6 +212,15 @@ def get_mqa_histogram_module():
     )
 
 
+@supported_compute_capability([100, 103])
+def _check_mqa_histogram_supported(
+    *args,
+    **kwargs,
+) -> bool:
+    return True
+
+
+@backend_requirement({}, common_check=_check_mqa_histogram_supported)
 @flashinfer_api
 def get_mqa_metadata(
     seq_lens: torch.Tensor, num_sms: Optional[int] = None
@@ -227,6 +241,7 @@ def get_mqa_metadata(
     return get_mqa_histogram_module().get_mqa_metadata(seq_lens, num_sms)
 
 
+@backend_requirement({}, common_check=_check_mqa_histogram_supported)
 @flashinfer_api
 def mqa_topk_indexer_non_fused(
     q: torch.Tensor,
@@ -267,6 +282,7 @@ def mqa_topk_indexer_non_fused(
     return indices, logits
 
 
+@backend_requirement({}, common_check=_check_mqa_histogram_supported)
 @flashinfer_api
 def mqa_topk_indexer(
     q: torch.Tensor,
