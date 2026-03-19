@@ -3,18 +3,8 @@
 #include <stdio.h>
 
 #include <cstdint>
-#include <iostream>
 #include <stdexcept>
-
-#define CUDA_CHECK(call)                                                    \
-  do {                                                                      \
-    cudaError_t err = call;                                                 \
-    if (err != cudaSuccess) {                                               \
-      std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << " - " \
-                << cudaGetErrorString(err) << std::endl;                    \
-      exit(EXIT_FAILURE);                                                   \
-    }                                                                       \
-  } while (0)
+#include <string>
 
 __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
   uint32_t bits = __float_as_uint(x);
@@ -100,30 +90,6 @@ __device__ __forceinline__ uint32_t InclusiveWarpDownScan(uint32_t val) {
 
   return val;
 }
-
-__device__ __forceinline__ void WLMS(uint8_t val, int* shared_hist, bool active_mask = true) {
-  if (active_mask) {
-    atomicAdd(shared_hist + val, 1);
-  }
-  return;
-  unsigned warpFlags = __ballot_sync(0xffffffff, active_mask);
-  for (int k = 0; k < 8; ++k) {
-    const bool t2 = val >> k & 1;
-    warpFlags &= (t2 ? 0 : 0xffffffff) ^ __ballot_sync(0xffffffff, t2);
-  }
-
-  // now warpFlags contains the bit pattern of all lanes, where 1 = the val of
-  // that lane is the same as the current val bits == 0 if this is the first
-  // lane holding val (out of the lanes that hold the same val)
-  const uint32_t bits = __popc(warpFlags & getLaneMaskLt());
-
-  // __popc(warpFlags) counts the number of lanes that hold the same val, only
-  // the first such lane increments the shared histogram
-  if (bits == 0 && active_mask) {
-    atomicAdd(shared_hist + val, __popc(warpFlags));
-  }
-}
-
 __device__ inline float2 explicit_load_float2(const float2* ptr) {
   float2 res;
   asm("ld.global.nc.L1::no_allocate.L2::256B.v2.f32 {%0,%1}, [%2];"
@@ -143,7 +109,11 @@ void setup_kernel_smem_once() {
 
     return cudaFuncSetAttribute(func_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
   }();
-  CUDA_CHECK(result);
+  if (result != cudaSuccess) {
+    throw std::runtime_error(
+        std::string("cudaFuncSetAttribute(MaxDynamicSharedMemorySize) failed: ") +
+        cudaGetErrorString(result));
+  }
 }
 template <auto* kernel_func>
 void setup_non_portable_clusters_once() {
@@ -204,4 +174,119 @@ __host__ __device__ inline void print_bits(uint32_t bits) {
   for (int i = 0; i < 32; i++) {
     printf("%d", (bits >> (31 - i)) & 1);
   }
+}
+
+// run_vectorized_v2 / run_vectorized_v4 / run_vectorized
+//
+// Helpers that iterate over a 1-D logits array using vectorised loads and invoke
+// a per-element callback f(float value, int global_index).
+//
+// Template parameters (shared across all three variants):
+//   NumBlocks    – number of blocks in the cooperative cluster assigned to this
+//                  sequence.  The grid stride is NumBlocks * Threads (or
+//                  NumBlocks * Threads * VecType for the vectorised inner loop),
+//                  so that each block processes a disjoint, interleaved slice.
+//   Threads      – number of threads per block (typically 1024).  Each thread
+//                  handles one float2 / float4 element per inner-loop iteration.
+//   UnRollFactor – static unroll depth for the inner loop.  The loop body is
+//                  replicated UnRollFactor times by the compiler, reducing loop
+//                  overhead and improving instruction-level parallelism.
+//   VecType      – (run_vectorized only) vector width: 2 → float2 loads,
+//                  4 → float4 loads.  Wider loads reduce memory transaction
+//                  overhead on L2/DRAM.  Must be 2 or 4.
+//   F            – callable with signature void(float value, int index).
+//
+// The main loop covers the largest aligned prefix of seq_len that fits an exact
+// number of full grid strides × UnRollFactor tiles.  run_vectorized then falls
+// through to a scalar tail loop that handles the remaining elements, ensuring
+// every index in [0, seq_len) is visited exactly once.
+
+// float2 vectorised inner loop (2 floats per load).
+template <int NumBlocks, int Threads, int UnRollFactor, typename F>
+__device__ __forceinline__ void run_vectorized_v2(const float2* logits, const int seq_len,
+                                                  const int block_id, F f) {
+  constexpr int ElemPerBlock = Threads;
+  constexpr int GridStride = NumBlocks * ElemPerBlock;
+
+  for (int t = 0; t < seq_len / (2 * GridStride * UnRollFactor); t++) {
+#pragma unroll
+    for (int j = 0; j < UnRollFactor; j++) {
+      int offset =
+          t * GridStride * UnRollFactor + j * GridStride + block_id * ElemPerBlock + threadIdx.x;
+      float2 val = logits[offset];
+      f(val.x, offset * 2);
+      f(val.y, offset * 2 + 1);
+    }
+  }
+}
+
+// float4 vectorised inner loop (4 floats per load).
+template <int NumBlocks, int Threads, int UnRollFactor, typename F>
+__device__ __forceinline__ void run_vectorized_v4(const float4* logits, const int seq_len,
+                                                  const int block_id, F f) {
+  constexpr int ElemPerBlock = Threads;
+  constexpr int GridStride = NumBlocks * ElemPerBlock;
+
+  for (int t = 0; t < seq_len / (4 * GridStride * UnRollFactor); t++) {
+#pragma unroll
+    for (int j = 0; j < UnRollFactor; j++) {
+      int offset =
+          t * GridStride * UnRollFactor + j * GridStride + block_id * ElemPerBlock + threadIdx.x;
+      float4 val = logits[offset];
+      f(val.x, offset * 4);
+      f(val.y, offset * 4 + 1);
+      f(val.z, offset * 4 + 2);
+      f(val.w, offset * 4 + 3);
+    }
+  }
+}
+
+// Dispatch to the float2 or float4 inner loop based on VecType, then handle
+// any tail elements that don't fill a complete vectorised tile with a scalar loop.
+template <int NumBlocks, int Threads, int UnrollFactor, int VecType, typename F>
+__device__ __forceinline__ void run_vectorized(const float* logits, const int seq_len,
+                                               const int block_id, F f) {
+  static_assert(VecType == 2 || VecType == 4, "expected VecType == 2 or 4");
+  if (VecType == 2) {
+    run_vectorized_v2<NumBlocks, Threads, UnrollFactor>((float2*)logits, seq_len, block_id, f);
+  } else if (VecType == 4) {
+    run_vectorized_v4<NumBlocks, Threads, UnrollFactor>((float4*)logits, seq_len, block_id, f);
+  }
+
+  // Scalar tail: cover elements not reached by the aligned vectorised loop above.
+  constexpr int ElemPerBlock = VecType * Threads;
+  constexpr int GridStride = NumBlocks * ElemPerBlock;
+  int leftover_offset = (seq_len / (GridStride * UnrollFactor)) * GridStride * UnrollFactor;
+  for (int i = leftover_offset + threadIdx.x + block_id * Threads; i < seq_len;
+       i += Threads * NumBlocks) {
+    f(logits[i], i);
+  }
+}
+
+__device__ __forceinline__ int cum_sum(int* s_hist_buf) {
+  constexpr int RADIX = 256;
+  const int warp_idx = threadIdx.x / 32;
+
+  __shared__ int reduce_buf[8];
+  int val = 0;
+  if (threadIdx.x < RADIX) {
+    val = s_hist_buf[threadIdx.x];
+    val = InclusiveWarpDownScan<32>(val);
+    if (getLaneId() == 0 && warp_idx < 8) {
+      reduce_buf[warp_idx] = val;
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    int cum_val = InclusiveWarpDownScan<8>(threadIdx.x < 8 ? reduce_buf[threadIdx.x] : 0);
+    __syncwarp();
+    if (threadIdx.x < 8) {
+      reduce_buf[threadIdx.x] = cum_val;
+    }
+  }
+  __syncthreads();
+  if (warp_idx < 7) {
+    val += reduce_buf[warp_idx + 1];
+  }
+  return val;
 }

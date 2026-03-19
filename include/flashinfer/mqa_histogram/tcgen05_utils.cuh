@@ -4,6 +4,8 @@
 #include <cuda_fp8.h>
 
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 
 // https://github.com/NVIDIA/cutlass/blob/v4.2.1/include/cute/arch/cluster_sm90.hpp#L180
 __device__ inline uint32_t elect_sync() {
@@ -166,4 +168,62 @@ __device__ inline void tcgen05_ld_32x32b(int addr, float (&tmp)[WIDTH]) {
   } else {
     static_assert(false, "WIDTH must be 2, 4, 8, 16, 32, or 64");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Shared-memory address conversion
+// ---------------------------------------------------------------------------
+
+// Convert a generic pointer to a 32-bit shared-memory address suitable for
+// use in inline PTX instructions that expect a .shared::cta address operand.
+template <typename T>
+__device__ inline int cvt_addr(T* addr) {
+  return static_cast<int>(__cvta_generic_to_shared(addr));
+}
+
+// ---------------------------------------------------------------------------
+// TMA tensor-map helpers (host-side)
+// ---------------------------------------------------------------------------
+
+// Encode an N-dimensional tiled tensor map for TMA.
+// Template parameter rank must match the lengths of globalDim, globalStrides,
+// and boxDim.  All dimensions and strides are in units of uint8 elements.
+template <int rank>
+inline void init_tensormap_nd(CUtensorMap* tmap, uint8_t* ptr, uint64_t* globalDim,
+                              uint64_t* globalStrides, uint32_t* boxDim) {
+  uint32_t elem_strides[rank];
+  for (int i = 0; i < rank; ++i) {
+    elem_strides[i] = 1;
+  }
+  auto err = cuTensorMapEncodeTiled(tmap, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8, rank,
+                                    (void*)ptr, globalDim, globalStrides, boxDim, elem_strides,
+                                    CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                    CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
+                                    CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                    CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (err != CUDA_SUCCESS) {
+    const char* err_str = nullptr;
+    cuGetErrorString(err, &err_str);
+    throw std::runtime_error(std::string("cuTensorMapEncodeTiled failed: ") +
+                             (err_str ? err_str : "unknown error"));
+  }
+}
+
+// Build Q and K tensor maps for the MQA kernel.
+//   Q layout: [batch_size, Q_NEXT * 64, 128] uint8, stride [Q_NEXT * 64 * 128, 128]
+//   K layout: [num_pages,          64, 128] uint8, stride [64 * 132, 128]
+// The K global stride is 132 * 64 (not 128 * 64) because each page row is
+// padded to 132 bytes to hold 128 fp8 values + 64 fp32 per-token scales.
+template <int Q_NEXT>
+inline void prep_tmaps(CUtensorMap* q_tmap, CUtensorMap* k_tmap, uint8_t* q_ptr, uint8_t* k_ptr,
+                       int batch_size, int num_pages) {
+  uint32_t q_boxDim[3] = {128, 64 * Q_NEXT, 1};
+  uint32_t k_boxDim[3] = {128, 64, 1};
+
+  uint64_t q_globalDim[3] = {128, 64 * Q_NEXT, (uint64_t)batch_size};
+  uint64_t k_globalDim[3] = {128, 64, (uint64_t)num_pages};
+  uint64_t q_globalStrides[2] = {128, 128 * 64 * Q_NEXT};
+  uint64_t k_globalStrides[2] = {128, 132 * 64};
+  init_tensormap_nd<3>(q_tmap, q_ptr, q_globalDim, q_globalStrides, q_boxDim);
+  init_tensormap_nd<3>(k_tmap, k_ptr, k_globalDim, k_globalStrides, k_boxDim);
 }

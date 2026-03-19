@@ -9,11 +9,6 @@
 
 #define KBLOCK 128
 
-template <typename T>
-__device__ int cvt_addr(T* addr) {
-  return static_cast<int>(__cvta_generic_to_shared(addr));
-}
-
 // The algorithm is as follows:
 // Each threadblock handles a tile Q[q_next * 64, 128] and a range of pages
 // [page_offset, page_offset + num_pages) in the kv cache First Q is loaded into
@@ -492,45 +487,13 @@ __global__ __launch_bounds__(EPILOGUE_WARPGRPS * 7 * 32, 1) void mqa_v3_fused_ep
   }
 }
 
-template <int rank>
-inline void init_tensormap_nd(CUtensorMap* tmap, uint8_t* ptr, uint64_t* globalDim,
-                              uint64_t* globalStrides, uint32_t* boxDim) {
-  uint32_t elem_strides[rank];
-  for (int i = 0; i < rank; ++i) {
-    elem_strides[i] = 1;
-  }
-
-  auto err = cuTensorMapEncodeTiled(tmap, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8, rank,
-                                    (void*)ptr, globalDim, globalStrides, boxDim, elem_strides,
-                                    CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-                                    CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
-                                    CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-                                    CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  assert(err == CUDA_SUCCESS);
-}
-
-template <int Q_NEXT>
-inline void prep_tmaps(CUtensorMap* q_tmap, CUtensorMap* k_tmap, uint8_t* q_ptr, uint8_t* k_ptr,
-                       int batch_size, int num_pages) {
-  uint32_t q_boxDim[3] = {128, 64 * Q_NEXT, 1};
-  uint32_t k_boxDim[3] = {128, 64, 1};
-
-  uint64_t q_globalDim[3] = {128, 64 * Q_NEXT, (uint64_t)batch_size};
-  uint64_t k_globalDim[3] = {128, 64, (uint64_t)num_pages};
-  uint64_t q_globalStrides[2] = {128, 128 * 64 * Q_NEXT};
-  uint64_t k_globalStrides[2] = {128, 132 * 64};
-  init_tensormap_nd<3>(q_tmap, q_ptr, q_globalDim, q_globalStrides, q_boxDim);
-  init_tensormap_nd<3>(k_tmap, k_ptr, k_globalDim, k_globalStrides, k_boxDim);
-}
-
 // launches the fused epilogue kernel, where we compute the histogram of logits
 // bits [0-8) for the first instance of the topK kernel
-extern "C" void launch_mqa_v3_fused_epilogue(uint8_t* q_ptr, uint8_t* k_ptr, float* weights,
-                                             int* seq_lens, int* block_table, float* logits,
-                                             uint32_t* histogram, int4* sm_map, int max_num_pages,
-                                             int num_pages, int batch_size, int num_sms,
-                                             int sm_multiple, int logit_batch_stride,
-                                             bool pdl_enabled, cudaStream_t stream) {
+void launch_mqa_v3_fused_epilogue(uint8_t* q_ptr, uint8_t* k_ptr, float* weights, int* seq_lens,
+                                  int* block_table, float* logits, uint32_t* histogram,
+                                  int4* sm_map, int max_num_pages, int num_pages, int batch_size,
+                                  int num_sms, int sm_multiple, int logit_batch_stride,
+                                  bool pdl_enabled, cudaStream_t stream) {
   constexpr int Q_NEXT = 1;
   constexpr int EPILOGUE_WARPGRPS = 2;
   constexpr int VECTORIZE_TCGEN_LD = 16;

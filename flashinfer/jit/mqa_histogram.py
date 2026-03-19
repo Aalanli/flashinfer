@@ -27,7 +27,6 @@ def gen_mqa_histogram_module() -> JitSpec:
             jit_env.FLASHINFER_CSRC_DIR / "mqa_metadata.cu",
             jit_env.FLASHINFER_CSRC_DIR / "mqa_v2_hist.cu",
             jit_env.FLASHINFER_CSRC_DIR / "mqa_v2.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "topk_clusters_pre_hist.cu",
             jit_env.FLASHINFER_CSRC_DIR / "fast_topk_clusters.cu",
             jit_env.FLASHINFER_CSRC_DIR / "flashinfer_mqa_histogram_binding.cu",
         ],

@@ -44,6 +44,8 @@ def get_mqa_histogram_module():
         indices: torch.Tensor,
         pdl_enabled: bool,
         sm_multiple: int,
+        num_cached: int,
+        num_clusters: int,
     ) -> None:
         module.mqa_topk_indexer(
             q,
@@ -57,6 +59,8 @@ def get_mqa_histogram_module():
             indices,
             pdl_enabled,
             sm_multiple,
+            num_cached,
+            num_clusters,
         )
 
     @register_fake_op("flashinfer::mqa_topk_indexer")
@@ -72,6 +76,8 @@ def get_mqa_histogram_module():
         indices: torch.Tensor,
         pdl_enabled: bool,
         sm_multiple: int,
+        num_cached: int,
+        num_clusters: int,
     ) -> None:
         pass
 
@@ -95,47 +101,29 @@ def get_mqa_histogram_module():
             num_logical_sms, 4, dtype=torch.int32, device=seq_lens.device
         )
 
-    @register_custom_op(
-        "flashinfer::fast_topk_clusters_fused", mutates_args=("indices",)
-    )
-    def _fast_topk_clusters_fused(
-        logits: torch.Tensor,
-        histogram: torch.Tensor,
-        indices: torch.Tensor,
-        seq_lens: torch.Tensor,
-        pdl_enabled: bool,
-    ) -> None:
-        module.fast_topk_clusters_fused(
-            logits, histogram, indices, seq_lens, pdl_enabled
-        )
-
-    @register_fake_op("flashinfer::fast_topk_clusters_fused")
-    def _fake_fast_topk_clusters_fused(
-        logits: torch.Tensor,
-        histogram: torch.Tensor,
-        indices: torch.Tensor,
-        seq_lens: torch.Tensor,
-        pdl_enabled: bool,
-    ) -> None:
-        pass
-
     @register_custom_op("flashinfer::fast_topk_clusters", mutates_args=("indices",))
     def _fast_topk_clusters(
         logits: torch.Tensor,
         indices: torch.Tensor,
         seq_lens: torch.Tensor,
+        histogram: Optional[torch.Tensor],
         num_cached: int,
         num_clusters: int,
+        pdl_enabled: bool,
     ) -> None:
-        module.fast_topk_clusters(logits, indices, seq_lens, num_cached, num_clusters)
+        module.fast_topk_clusters(
+            logits, indices, seq_lens, histogram, num_cached, num_clusters, pdl_enabled
+        )
 
     @register_fake_op("flashinfer::fast_topk_clusters")
     def _fake_fast_topk_clusters(
         logits: torch.Tensor,
         indices: torch.Tensor,
         seq_lens: torch.Tensor,
+        histogram: Optional[torch.Tensor],
         num_cached: int,
         num_clusters: int,
+        pdl_enabled: bool,
     ) -> None:
         pass
 
@@ -213,7 +201,6 @@ def get_mqa_histogram_module():
     return SimpleNamespace(
         mqa_topk_indexer=_mqa_topk_indexer,
         get_mqa_metadata=_get_mqa_metadata,
-        fast_topk_clusters_fused=_fast_topk_clusters_fused,
         fast_topk_clusters=_fast_topk_clusters,
         mqa_logits=_mqa_logits,
         mqa_logits_fused=_mqa_logits_fused,
@@ -275,7 +262,7 @@ def mqa_topk_indexer_non_fused(
 
     ops = get_mqa_histogram_module()
     ops.mqa_logits(q, k_cache, weights, seq_lens, block_table, logits, sm_map, 1)
-    ops.fast_topk_clusters(logits, indices, seq_lens, 4096, 8)
+    ops.fast_topk_clusters(logits, indices, seq_lens, None, 4096, 8, False)
 
     return indices, logits
 
@@ -291,6 +278,8 @@ def mqa_topk_indexer(
     max_model_len: int = 163840,
     pdl_enabled: bool = False,
     sm_multiple: int = 1,
+    num_cached: int = 4096,
+    num_clusters: int = 8,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused MQA top-K indexer: logit computation + histogram + top-K in one pass.
 
@@ -305,6 +294,8 @@ def mqa_topk_indexer(
         max_model_len: Maximum sequence length to allocate logits buffer for.
         pdl_enabled: Enable Programmatic Launch Dependent (PDL) grid synchronization.
         sm_multiple: SM multiplier for load distribution.
+        num_cached:  Cache budget per sequence for the radix top-K pass.
+        num_clusters: Number of cooperative thread block clusters.
 
     Returns:
         (indices, logits): indices [batch, 2048] int32, logits [batch, max_model_len] float32.
@@ -330,5 +321,7 @@ def mqa_topk_indexer(
         indices,
         pdl_enabled,
         sm_multiple,
+        num_cached,
+        num_clusters,
     )
     return indices, logits

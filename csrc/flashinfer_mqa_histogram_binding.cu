@@ -15,16 +15,8 @@
  */
 #include "tvm_ffi_utils.h"
 
-extern "C" {
-
 void launch_mqa_kernel_metadata(int* seq_lens, int batch_size, int num_physical_sms,
                                 int* sm_mapping, cudaStream_t stream);
-
-void launch_fast_topk_clusters_fused_prologue(const float* logits, const int* first_hist,
-                                              int* indices, int* seq_lens, int batch_size,
-                                              int logit_stride, int num_cached,
-                                              int ind_batch_stride, bool pdl_enabled,
-                                              cudaStream_t stream);
 
 void launch_mqa_v3_fused_epilogue(uint8_t* q_ptr, uint8_t* k_ptr, float* weights, int* seq_lens,
                                   int* block_table, float* logits, uint32_t* histogram,
@@ -32,16 +24,16 @@ void launch_mqa_v3_fused_epilogue(uint8_t* q_ptr, uint8_t* k_ptr, float* weights
                                   int num_sms, int sm_multiple, int logit_batch_stride,
                                   bool pdl_enabled, cudaStream_t stream);
 
-void launch_fast_topk_clusters(const float* logits, int* indices, int* seq_lens, int batch_size,
-                               int logit_stride, int indices_stride, int num_cached,
-                               int num_clusters, cudaStream_t stream);
+void launch_fast_topk_clusters(const float* logits, int* indices, int* seq_lens, int* pre_hist,
+                               int batch_size, int logit_stride, int indices_stride, int num_cached,
+                               int num_clusters, bool pdl_enabled, cudaStream_t stream);
 
 void launch_mqa_logits(uint8_t* q_ptr, uint8_t* k_ptr, float* weights, int* seq_lens,
                        int* block_table, float* logits, int4* sm_map, int max_num_pages,
                        int num_pages, int batch_size, int logits_stride, int num_sms,
                        int sm_multiple, cudaStream_t stream);
 
-}  // extern "C"
+using tvm::ffi::Optional;
 
 // ---------------------------------------------------------------------------
 // Tensor check helpers
@@ -145,6 +137,44 @@ static void check_indices(const TensorView& t, int64_t batch_size, const char* f
 // Exported functions (TVM-FFI)
 // ---------------------------------------------------------------------------
 
+// fast_topk_clusters:
+//   logits:       [batch, >=logit_stride]  float32, may be non-contiguous
+//   indices:      [batch, 2048]            int32
+//   seq_lens:     [batch]                  int32
+//   histogram:    Optional[batch, 256]     int32; if provided, used as the first-pass histogram
+//                                          (pre_hist), skipping the initial histogram scan
+//   num_cached:   int64_t
+//   num_clusters: int64_t
+//   pdl_enabled:  bool
+// Fills indices in-place.
+void fast_topk_clusters(TensorView logits, TensorView indices, TensorView seq_lens,
+                        Optional<TensorView> histogram, int64_t num_cached, int64_t num_clusters,
+                        bool pdl_enabled) {
+  const int64_t batch_size = logits.size(0);
+  check_logits(logits, batch_size, "fast_topk_clusters");
+  check_indices(indices, batch_size, "fast_topk_clusters");
+  check_seq_lens(seq_lens, "fast_topk_clusters", batch_size);
+
+  const int* hist_ptr = nullptr;
+  if (histogram.has_value()) {
+    check_histogram(histogram.value(), batch_size, "fast_topk_clusters");
+    hist_ptr = static_cast<const int*>(histogram.value().data_ptr());
+  }
+
+  const int logit_stride = static_cast<int>(logits.stride(0));
+  const int indices_stride = static_cast<int>(indices.stride(0));
+  cudaStream_t stream = get_current_stream();
+
+  launch_fast_topk_clusters(
+      static_cast<const float*>(logits.data_ptr()), static_cast<int*>(indices.data_ptr()),
+      static_cast<int*>(seq_lens.data_ptr()), const_cast<int*>(hist_ptr),
+      static_cast<int>(batch_size), logit_stride, indices_stride, static_cast<int>(num_cached),
+      static_cast<int>(num_clusters), pdl_enabled, stream);
+  auto err = cudaGetLastError();
+  TVM_FFI_ICHECK(err == cudaSuccess)
+      << "launch_fast_topk_clusters failed: " << cudaGetErrorString(err);
+}
+
 // mqa_topk_indexer:
 //   q:           [batch, 64, 128]              fp8/uint8
 //   k_cache:     [num_pages, 64, 1, 132]       fp8/uint8
@@ -157,11 +187,13 @@ static void check_indices(const TensorView& t, int64_t batch_size, const char* f
 //   indices:     [batch, 2048]                 int32, may be non-contiguous
 //   pdl_enabled: bool
 //   sm_multiple: int64_t
+//   num_cached:  int64_t  (cache budget per sequence for the radix top-K pass)
+//   num_clusters: int64_t (number of cooperative thread block clusters)
 // Fills logits and indices in-place.
 void mqa_topk_indexer(TensorView q, TensorView k_cache, TensorView weights, TensorView seq_lens,
                       TensorView block_table, TensorView histogram, TensorView sm_map,
-                      TensorView logits, TensorView indices, bool pdl_enabled,
-                      int64_t sm_multiple) {
+                      TensorView logits, TensorView indices, bool pdl_enabled, int64_t sm_multiple,
+                      int64_t num_cached, int64_t num_clusters) {
   const int64_t batch_size = q.size(0);
   check_q(q, batch_size, "mqa_topk_indexer");
   check_k_cache(k_cache, "mqa_topk_indexer");
@@ -177,6 +209,7 @@ void mqa_topk_indexer(TensorView q, TensorView k_cache, TensorView weights, Tens
   const int max_num_pages = static_cast<int>(block_table.size(1));
   const int num_sms = static_cast<int>(sm_map.size(0));
   const int logit_stride = static_cast<int>(logits.stride(0));
+  const int indices_stride = static_cast<int>(indices.stride(0));
 
   cudaStream_t stream = get_current_stream();
 
@@ -187,12 +220,23 @@ void mqa_topk_indexer(TensorView q, TensorView k_cache, TensorView weights, Tens
       reinterpret_cast<uint32_t*>(histogram.data_ptr()), reinterpret_cast<int4*>(sm_map.data_ptr()),
       max_num_pages, num_pages, static_cast<int>(batch_size), num_sms,
       static_cast<int>(sm_multiple), logit_stride, pdl_enabled, stream);
+  {
+    auto err = cudaGetLastError();
+    TVM_FFI_ICHECK(err == cudaSuccess)
+        << "launch_mqa_v3_fused_epilogue failed: " << cudaGetErrorString(err);
+  }
 
-  launch_fast_topk_clusters_fused_prologue(
-      static_cast<const float*>(logits.data_ptr()), static_cast<const int*>(histogram.data_ptr()),
-      static_cast<int*>(indices.data_ptr()), static_cast<int*>(seq_lens.data_ptr()),
-      static_cast<int>(batch_size), logit_stride,
-      /*num_cached=*/4096, static_cast<int>(indices.stride(0)), pdl_enabled, stream);
+  launch_fast_topk_clusters(
+      static_cast<const float*>(logits.data_ptr()), static_cast<int*>(indices.data_ptr()),
+      static_cast<int*>(seq_lens.data_ptr()),
+      reinterpret_cast<int*>(histogram.data_ptr()),  // pre_hist from fused epilogue
+      static_cast<int>(batch_size), logit_stride, indices_stride, static_cast<int>(num_cached),
+      static_cast<int>(num_clusters), pdl_enabled, stream);
+  {
+    auto err = cudaGetLastError();
+    TVM_FFI_ICHECK(err == cudaSuccess)
+        << "launch_fast_topk_clusters failed: " << cudaGetErrorString(err);
+  }
 }
 
 // get_mqa_metadata:
@@ -217,56 +261,10 @@ ffi::Tensor get_mqa_metadata(TensorView seq_lens, int64_t num_physical_sms) {
   launch_mqa_kernel_metadata(static_cast<int*>(seq_lens.data_ptr()), batch_size,
                              static_cast<int>(num_physical_sms),
                              static_cast<int*>(sm_map.data_ptr()), stream);
+  auto err = cudaGetLastError();
+  TVM_FFI_ICHECK(err == cudaSuccess)
+      << "launch_mqa_kernel_metadata failed: " << cudaGetErrorString(err);
   return sm_map;
-}
-
-// fast_topk_clusters_fused:
-//   logits:      [batch, >=logit_stride]  float32, may be non-contiguous
-//   histogram:   [batch, 256]             int32, contiguous
-//   indices:     [batch, 2048]            int32, may be non-contiguous
-//   seq_lens:    [batch]                  int32
-//   pdl_enabled: bool
-// Fills indices in-place.
-void fast_topk_clusters_fused(TensorView logits, TensorView histogram, TensorView indices,
-                              TensorView seq_lens, bool pdl_enabled) {
-  const int64_t batch_size = logits.size(0);
-  check_logits(logits, batch_size, "fast_topk_clusters_fused");
-  check_histogram(histogram, batch_size, "fast_topk_clusters_fused");
-  check_indices(indices, batch_size, "fast_topk_clusters_fused");
-  check_seq_lens(seq_lens, "fast_topk_clusters_fused", batch_size);
-
-  const int logit_stride = static_cast<int>(logits.stride(0));
-  cudaStream_t stream = get_current_stream();
-
-  launch_fast_topk_clusters_fused_prologue(
-      static_cast<const float*>(logits.data_ptr()), static_cast<const int*>(histogram.data_ptr()),
-      static_cast<int*>(indices.data_ptr()), static_cast<int*>(seq_lens.data_ptr()),
-      static_cast<int>(batch_size), logit_stride,
-      /*num_cached=*/4096, static_cast<int>(indices.stride(0)), pdl_enabled, stream);
-}
-
-// fast_topk_clusters:
-//   logits:       [batch, >=logit_stride]  float32, may be non-contiguous
-//   indices:      [batch, 2048]            int32
-//   seq_lens:     [batch]                  int32
-//   num_cached:   int64_t
-//   num_clusters: int64_t
-// Fills indices in-place.
-void fast_topk_clusters(TensorView logits, TensorView indices, TensorView seq_lens,
-                        int64_t num_cached, int64_t num_clusters) {
-  const int64_t batch_size = logits.size(0);
-  check_logits(logits, batch_size, "fast_topk_clusters");
-  check_indices(indices, batch_size, "fast_topk_clusters");
-  check_seq_lens(seq_lens, "fast_topk_clusters", batch_size);
-
-  const int logit_stride = static_cast<int>(logits.stride(0));
-  const int indices_stride = static_cast<int>(indices.stride(0));
-  cudaStream_t stream = get_current_stream();
-
-  launch_fast_topk_clusters(
-      static_cast<const float*>(logits.data_ptr()), static_cast<int*>(indices.data_ptr()),
-      static_cast<int*>(seq_lens.data_ptr()), static_cast<int>(batch_size), logit_stride,
-      indices_stride, static_cast<int>(num_cached), static_cast<int>(num_clusters), stream);
 }
 
 // mqa_logits:
@@ -303,6 +301,8 @@ void mqa_logits(TensorView q, TensorView k_cache, TensorView weights, TensorView
       static_cast<int*>(block_table.data_ptr()), static_cast<float*>(logits.data_ptr()),
       reinterpret_cast<int4*>(sm_map.data_ptr()), max_num_pages, num_pages,
       static_cast<int>(batch_size), logit_stride, num_sms, static_cast<int>(sm_multiple), stream);
+  auto err = cudaGetLastError();
+  TVM_FFI_ICHECK(err == cudaSuccess) << "launch_mqa_logits failed: " << cudaGetErrorString(err);
 }
 
 // mqa_logits_fused:
@@ -344,11 +344,13 @@ void mqa_logits_fused(TensorView q, TensorView k_cache, TensorView weights, Tens
       reinterpret_cast<uint32_t*>(histogram.data_ptr()), reinterpret_cast<int4*>(sm_map.data_ptr()),
       max_num_pages, num_pages, static_cast<int>(batch_size), num_sms,
       static_cast<int>(sm_multiple), logit_stride, pdl_enabled, stream);
+  auto err = cudaGetLastError();
+  TVM_FFI_ICHECK(err == cudaSuccess)
+      << "launch_mqa_v3_fused_epilogue failed: " << cudaGetErrorString(err);
 }
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mqa_topk_indexer, mqa_topk_indexer);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(get_mqa_metadata, get_mqa_metadata);
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(fast_topk_clusters_fused, fast_topk_clusters_fused);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(fast_topk_clusters, fast_topk_clusters);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mqa_logits, mqa_logits);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mqa_logits_fused, mqa_logits_fused);

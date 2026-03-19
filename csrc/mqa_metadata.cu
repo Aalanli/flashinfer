@@ -83,8 +83,8 @@ __global__ void mqa_kernel_metadata(
   }
 }
 
-extern "C" void launch_mqa_kernel_metadata(int* seq_lens, int batch_size, int num_physical_sms,
-                                           int* sm_mapping, cudaStream_t stream) {
+void launch_mqa_kernel_metadata(int* seq_lens, int batch_size, int num_physical_sms,
+                                int* sm_mapping, cudaStream_t stream) {
   int num_blocks = (batch_size + num_physical_sms - 1) / num_physical_sms;
 
   int warps = (num_physical_sms + 31) / 32;

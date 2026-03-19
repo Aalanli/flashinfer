@@ -9,7 +9,6 @@ Compares:
 
 Usage:
   python benchmarks/bench_dsv3_sparse_indexer.py
-  python benchmarks/bench_dsv3_sparse_indexer.py --compare-deepgemm
   python benchmarks/bench_dsv3_sparse_indexer.py --pdl
   python benchmarks/bench_dsv3_sparse_indexer.py --batch-sizes 1 4 64 --seq-lens 4096 32768
 """
@@ -123,6 +122,7 @@ def bench_dsv3_sparse_indexer(
     max_model_len = block_table.shape[1] * 64
     sm_map = get_mqa_metadata(seq_lens)
 
+    # for multiple kernels best use cuda graph with or without cupti
     enable_cupti = True
     use_cuda_graph = True
 
