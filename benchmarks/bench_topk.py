@@ -205,7 +205,10 @@ def bench_dsv3_topk(
     Inputs match the MQA indexer: logits [batch, seq_len] float32 with
     seq_lens [batch] int32 all set to seq_len.
     """
-    from flashinfer.mqa_histogram import get_mqa_histogram_module
+    from flashinfer.mqa_histogram import (
+        _mqa_histogram_num_clusters,
+        get_mqa_histogram_module,
+    )
 
     k = 2048
     ops = get_mqa_histogram_module()
@@ -215,9 +218,14 @@ def bench_dsv3_topk(
     seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.empty(batch_size, k, dtype=torch.int32, device="cuda")
 
+    num_clusters = _mqa_histogram_num_clusters(batch_size)
+    overflow_stride = seq_len // num_clusters
+
     # fast_topk_clusters: histogram-driven radix top-K with variable-length support
     measurements = bench_gpu_time(
-        lambda: ops.fast_topk_clusters(logits, indices, seq_lens, 4096, 8),
+        lambda: ops.fast_topk_clusters(
+            logits, indices, seq_lens, None, 4096, num_clusters, False
+        ),
         enable_cupti=True,
         dry_run_iters=10,
         repeat_iters=100,
@@ -228,6 +236,7 @@ def bench_dsv3_topk(
         "batch_size": batch_size,
         "seq_len": seq_len,
         "k": k,
+        "num_clusters": num_clusters,
         "fast_topk_clusters_us": ftc_ms * 1e3,
     }
 
@@ -241,6 +250,19 @@ def bench_dsv3_topk(
     fi_ms = np.median(measurements)
     result["flashinfer_top_k_us"] = fi_ms * 1e3
     result["speedup_vs_flashinfer"] = fi_ms / ftc_ms
+
+    # fast_topk_clusters_exact: overflow-safe variant, same heuristic cluster count
+    measurements = bench_gpu_time(
+        lambda: ops.fast_topk_clusters_exact(
+            logits, indices, seq_lens, None, 4096, num_clusters, overflow_stride, False
+        ),
+        enable_cupti=True,
+        dry_run_iters=10,
+        repeat_iters=100,
+    )
+    exact_ms = np.median(measurements)
+    result["fast_topk_exact_us"] = exact_ms * 1e3
+    result["exact_overhead"] = exact_ms / ftc_ms
 
     # SGLang fast_topk_v2: also supports variable-length via lengths tensor
     if compare_sglang and HAS_SGL_KERNEL:
@@ -498,18 +520,21 @@ def main():
         print("\n" + "=" * 100)
         print("dsv3_topk: DeepSeek v3 sparse-attention top-K shapes (k=2048, float32)")
         print(
-            "  fast_topk_clusters: histogram-driven radix top-K (variable-length aware)"
+            "  fast_topk_clusters:       histogram-driven radix top-K (variable-length aware)"
         )
-        print("  flashinfer top_k:   generic radix top-K (padded input)")
+        print(
+            "  fast_topk_clusters_exact: overflow-safe variant (always returns exact top-2048)"
+        )
+        print("  flashinfer top_k:         generic radix top-K (padded input)")
         if args.compare_sglang:
             print("  SGLang fast_topk_v2: variable-length aware (requires sgl_kernel)")
         print("=" * 100)
 
-        header = f"{'batch':>6} {'seq_len':>10} | {'fast_topk_clusters':>20} {'flashinfer_top_k':>18} {'Speedup':>10}"
+        header = f"{'batch':>6} {'seq_len':>10} | {'fast_topk_clusters':>20} {'exact':>12} {'overhead':>10} {'flashinfer_top_k':>18} {'Speedup':>10}"
         if args.compare_sglang:
             header += f" {'SGLang':>12} {'Speedup':>10}"
         print(header)
-        print("-" * (80 if not args.compare_sglang else 102))
+        print("-" * (100 if not args.compare_sglang else 122))
 
         for batch_size in dsv3_batch_sizes:
             for seq_len in dsv3_seq_lens:
@@ -522,6 +547,8 @@ def main():
                     line = (
                         f"{result['batch_size']:>6} {result['seq_len']:>10} | "
                         f"{result['fast_topk_clusters_us']:>18.2f}us "
+                        f"{result['fast_topk_exact_us']:>10.2f}us "
+                        f"{result['exact_overhead']:>9.2f}x "
                         f"{result['flashinfer_top_k_us']:>16.2f}us "
                         f"{result['speedup_vs_flashinfer']:>9.2f}x"
                     )

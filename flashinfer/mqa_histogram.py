@@ -203,13 +203,60 @@ def get_mqa_histogram_module():
     ) -> None:
         pass
 
+    @register_custom_op(
+        "flashinfer::fast_topk_clusters_exact", mutates_args=("indices",)
+    )
+    def _fast_topk_clusters_exact(
+        logits: torch.Tensor,
+        indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        histogram: Optional[torch.Tensor],
+        num_cached: int,
+        num_clusters: int,
+        overflow_stride: int,
+        pdl_enabled: bool,
+    ) -> None:
+        module.fast_topk_clusters_exact(
+            logits,
+            indices,
+            seq_lens,
+            histogram,
+            num_cached,
+            num_clusters,
+            overflow_stride,
+            pdl_enabled,
+        )
+
+    @register_fake_op("flashinfer::fast_topk_clusters_exact")
+    def _fake_fast_topk_clusters_exact(
+        logits: torch.Tensor,
+        indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        histogram: Optional[torch.Tensor],
+        num_cached: int,
+        num_clusters: int,
+        overflow_stride: int,
+        pdl_enabled: bool,
+    ) -> None:
+        pass
+
     return SimpleNamespace(
         mqa_topk_indexer=_mqa_topk_indexer,
         get_mqa_metadata=_get_mqa_metadata,
         fast_topk_clusters=_fast_topk_clusters,
+        fast_topk_clusters_exact=_fast_topk_clusters_exact,
         mqa_logits=_mqa_logits,
         mqa_logits_fused=_mqa_logits_fused,
     )
+
+
+def _mqa_histogram_num_clusters(batch_size: int) -> int:
+    if batch_size <= 32:
+        return 8
+    elif batch_size < 128:
+        return 4
+    else:
+        return 2
 
 
 @supported_compute_capability([100, 103])
@@ -277,9 +324,52 @@ def mqa_topk_indexer_non_fused(
 
     ops = get_mqa_histogram_module()
     ops.mqa_logits(q, k_cache, weights, seq_lens, block_table, logits, sm_map, 1)
-    ops.fast_topk_clusters(logits, indices, seq_lens, None, 4096, 8, False)
+    num_clusters = _mqa_histogram_num_clusters(batch_size)
+    ops.fast_topk_clusters(logits, indices, seq_lens, None, 4096, num_clusters, False)
 
     return indices, logits
+
+
+@backend_requirement({}, common_check=_check_mqa_histogram_supported)
+@flashinfer_api
+def fast_topk_clusters_exact(
+    logits: torch.Tensor,
+    indices: torch.Tensor,
+    seq_lens: torch.Tensor,
+    histogram: Optional[torch.Tensor] = None,
+    pdl_enabled: bool = False,
+) -> None:
+    """Exact radix top-K with global overflow cache: always returns exactly top-2048 indices.
+
+    Unlike fast_topk_clusters, this variant spills overflow entries to a
+    global buffer rather than silently dropping them, guaranteeing correctness
+    even when the shared-memory cache is too small for the threshold bin.
+
+    num_cached, num_clusters, and overflow_stride are chosen automatically
+    based on batch size and logits shape.
+
+    Args:
+        logits:      [batch, seq_len] float32 CUDA tensor.
+        indices:     [batch, 2048] int32 CUDA tensor, filled in-place.
+        seq_lens:    [batch] int32 CUDA tensor of per-sequence lengths.
+        histogram:   Optional [batch, 256] int32 pre-computed first-byte
+                     histogram. If provided, skips the first histogram scan.
+        pdl_enabled: Enable Programmatic Dependent Launch grid synchronization.
+    """
+    batch_size = logits.shape[0]
+    max_seq_len = logits.shape[1]
+    num_clusters = _mqa_histogram_num_clusters(batch_size)
+    overflow_stride = max_seq_len // num_clusters
+    get_mqa_histogram_module().fast_topk_clusters_exact(
+        logits,
+        indices,
+        seq_lens,
+        histogram,
+        4096,
+        num_clusters,
+        overflow_stride,
+        pdl_enabled,
+    )
 
 
 @backend_requirement({}, common_check=_check_mqa_histogram_supported)

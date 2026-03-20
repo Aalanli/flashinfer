@@ -28,6 +28,12 @@ void launch_fast_topk_clusters(const float* logits, int* indices, int* seq_lens,
                                int batch_size, int logit_stride, int indices_stride, int num_cached,
                                int num_clusters, bool pdl_enabled, cudaStream_t stream);
 
+void launch_fast_topk_clusters_exact(const float* logits, int* indices, int* seq_lens,
+                                     int* pre_hist, int* cached_overflow, int overflow_stride,
+                                     int batch_size, int logit_stride, int indices_stride,
+                                     int num_cached, int num_clusters, bool pdl_enabled,
+                                     cudaStream_t stream);
+
 void launch_mqa_logits(uint8_t* q_ptr, uint8_t* k_ptr, float* weights, int* seq_lens,
                        int* block_table, float* logits, int4* sm_map, int max_num_pages,
                        int num_pages, int batch_size, int logits_stride, int num_sms,
@@ -349,8 +355,54 @@ void mqa_logits_fused(TensorView q, TensorView k_cache, TensorView weights, Tens
       << "launch_mqa_v3_fused_epilogue failed: " << cudaGetErrorString(err);
 }
 
+// fast_topk_clusters_exact:
+//   logits:          [batch, >=logit_stride]  float32, may be non-contiguous
+//   indices:         [batch, 2048]            int32
+//   seq_lens:        [batch]                  int32
+//   histogram:       Optional[batch, 256]     int32; pre-computed first-byte histogram
+//   num_cached:      int64_t  (shared-cache capacity per CTA per phase)
+//   num_clusters:    int64_t
+//   overflow_stride: int64_t  (global overflow cache capacity per CTA per phase)
+//   pdl_enabled:     bool
+// Allocates the global overflow buffer internally and fills indices in-place.
+void fast_topk_clusters_exact(TensorView logits, TensorView indices, TensorView seq_lens,
+                              Optional<TensorView> histogram, int64_t num_cached,
+                              int64_t num_clusters, int64_t overflow_stride, bool pdl_enabled) {
+  const int64_t batch_size = logits.size(0);
+  check_logits(logits, batch_size, "fast_topk_clusters_exact");
+  check_indices(indices, batch_size, "fast_topk_clusters_exact");
+  check_seq_lens(seq_lens, "fast_topk_clusters_exact", batch_size);
+
+  const int* hist_ptr = nullptr;
+  if (histogram.has_value()) {
+    check_histogram(histogram.value(), batch_size, "fast_topk_clusters_exact");
+    hist_ptr = static_cast<const int*>(histogram.value().data_ptr());
+  }
+
+  const int logit_stride = static_cast<int>(logits.stride(0));
+  const int indices_stride = static_cast<int>(indices.stride(0));
+  const int n_clusters = static_cast<int>(num_clusters);
+  const int ovf_stride = static_cast<int>(overflow_stride);
+  cudaStream_t stream = get_current_stream();
+
+  // Global overflow buffer: overflow_stride * 4 * num_clusters int32 per batch entry.
+  // Each entry is a PackedCachedData (uint32_t bits + int index = 8 bytes = 2 int32).
+  auto cached_overflow =
+      alloc_tensor({batch_size * ovf_stride * 4 * n_clusters}, dl_int32, logits.device());
+
+  launch_fast_topk_clusters_exact(
+      static_cast<const float*>(logits.data_ptr()), static_cast<int*>(indices.data_ptr()),
+      static_cast<int*>(seq_lens.data_ptr()), const_cast<int*>(hist_ptr),
+      static_cast<int*>(cached_overflow.data_ptr()), ovf_stride, static_cast<int>(batch_size),
+      logit_stride, indices_stride, static_cast<int>(num_cached), n_clusters, pdl_enabled, stream);
+  auto err = cudaGetLastError();
+  TVM_FFI_ICHECK(err == cudaSuccess)
+      << "launch_fast_topk_clusters_exact failed: " << cudaGetErrorString(err);
+}
+
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mqa_topk_indexer, mqa_topk_indexer);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(get_mqa_metadata, get_mqa_metadata);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(fast_topk_clusters, fast_topk_clusters);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(fast_topk_clusters_exact, fast_topk_clusters_exact);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mqa_logits, mqa_logits);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mqa_logits_fused, mqa_logits_fused);

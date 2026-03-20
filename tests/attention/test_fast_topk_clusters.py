@@ -1,9 +1,13 @@
 """
-Tests for the fast_topk_clusters kernel.
+Tests for the fast_topk_clusters and fast_topk_clusters_exact kernels.
 
-Covers two modes:
+fast_topk_clusters covers two modes:
   - without pre-histogram (histogram=None): kernel builds the first-pass histogram itself
   - with pre-histogram (histogram provided): kernel reuses a caller-supplied histogram
+
+fast_topk_clusters_exact is the overflow-safe variant: it spills excess entries from the
+shared-memory cache to a global buffer, guaranteeing that all top-2048 indices are
+returned correctly regardless of histogram distribution.
 
 Requires SM100a (Blackwell) GPU.
 """
@@ -96,6 +100,75 @@ def test_fast_topk_clusters_no_histogram(batch_size, seq_len, num_clusters, num_
 
     get_mqa_histogram_module().fast_topk_clusters(
         logits, indices, seq_lens, None, num_cached, num_clusters, False
+    )
+
+    assert indices.shape == (batch_size, 2048)
+    valid = indices[indices >= 0]
+    assert (valid < seq_len).all(), "indices out of range"
+    _assert_topk_indices(logits, indices)
+
+
+@pytest.mark.parametrize("seq_len", SEQ_LENS)
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
+@pytest.mark.parametrize("num_clusters", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_cached", [4096, 8192])
+def test_fast_topk_clusters_exact_with_histogram(
+    batch_size, seq_len, num_clusters, num_cached
+):
+    """fast_topk_clusters_exact with a pre-supplied histogram (PRE_HISTOGRAM=true path)."""
+    if not is_sm100a_supported(torch.device("cuda")):
+        pytest.skip("Requires SM100a (Blackwell)")
+
+    torch.manual_seed(1)
+    logits = torch.randn(batch_size, seq_len, device="cuda", dtype=torch.float32)
+    histogram = _compute_hist(logits)
+    indices = torch.empty(batch_size, 2048, device="cuda", dtype=torch.int32)
+    seq_lens = torch.full((batch_size,), seq_len, device="cuda", dtype=torch.int32)
+    overflow_stride = max(1, (seq_len + num_clusters - 1) // num_clusters + 512)
+
+    get_mqa_histogram_module().fast_topk_clusters_exact(
+        logits,
+        indices,
+        seq_lens,
+        histogram,
+        num_cached,
+        num_clusters,
+        overflow_stride,
+        False,
+    )
+
+    assert indices.shape == (batch_size, 2048)
+    valid = indices[indices >= 0]
+    assert (valid < seq_len).all(), "indices out of range"
+    _assert_topk_indices(logits, indices)
+
+
+@pytest.mark.parametrize("seq_len", SEQ_LENS)
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
+@pytest.mark.parametrize("num_clusters", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_cached", [4096, 8192])
+def test_fast_topk_clusters_exact_no_histogram(
+    batch_size, seq_len, num_clusters, num_cached
+):
+    """fast_topk_clusters_exact without pre-histogram (PRE_HISTOGRAM=false path)."""
+    if not is_sm100a_supported(torch.device("cuda")):
+        pytest.skip("Requires SM100a (Blackwell)")
+
+    torch.manual_seed(1)
+    logits = torch.randn(batch_size, seq_len, device="cuda", dtype=torch.float32)
+    indices = torch.empty(batch_size, 2048, device="cuda", dtype=torch.int32)
+    seq_lens = torch.full((batch_size,), seq_len, device="cuda", dtype=torch.int32)
+    overflow_stride = max(1, (seq_len + num_clusters - 1) // num_clusters + 512)
+
+    get_mqa_histogram_module().fast_topk_clusters_exact(
+        logits,
+        indices,
+        seq_lens,
+        None,
+        num_cached,
+        num_clusters,
+        overflow_stride,
+        False,
     )
 
     assert indices.shape == (batch_size, 2048)
