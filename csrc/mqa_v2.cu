@@ -133,7 +133,7 @@ __device__ void mqa_v2_kernel(
   constexpr int num_special_warps = 32 * EPILOGUE_WARPGRPS * 3;
   constexpr int math_nreg = 8 * 22;
   constexpr int special_nreg = 32;
-  static_assert(num_epilogue_threads * math_nreg + num_special_warps * special_nreg <= 65636,
+  static_assert(num_epilogue_threads * math_nreg + num_special_warps * special_nreg <= 65536,
                 "too many registers");
 
   __syncthreads();  // first make qbar visible to all threads

@@ -268,7 +268,7 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
       if (top_k_remaining > 0) {
         // Collect threshold_bin items from shared cache.
         for (int i = threadIdx.x; i < buf_len; i += blockDim.x) {
-          int bin = s_cached_logit_bits[i] >> 24;
+          int bin = s_cached_logit_bits[i] & 0xff;
           int cached_idx = s_cached_indices[i];
           if (bin == threshold_bin) {
             int topk_offset = atomicAdd(&shared_final_idx_count, 1);
@@ -284,7 +284,7 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
           auto data = get_cached_overflow(phase ^ 1)[i];
           uint32_t bits = data.bits;
           int cached_idx = data.index;
-          int bin = bits >> 24;
+          int bin = bits & 0xff;
           if (bin == threshold_bin) {
             int topk_offset = atomicAdd(&shared_final_idx_count, 1);
             if (topk_offset < TopK) {

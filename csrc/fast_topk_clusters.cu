@@ -211,7 +211,7 @@ __device__ __forceinline__ void fast_topk_cuda_v4(
     if (t == 3) {
       if (top_k_remaining > 0) {
         for (int i = threadIdx.x; i < buf_len; i += blockDim.x) {
-          int bin = s_cached_logit_bits[i] >> 24;
+          int bin = s_cached_logit_bits[i] & 0xff;
           int cached_idx = s_cached_indices[i];
           if (bin == threshold_bin) {
             int topk_offset = atomicAdd(&shared_final_idx_count, 1);
