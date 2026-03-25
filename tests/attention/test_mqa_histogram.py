@@ -10,7 +10,7 @@ Requires SM100a (Blackwell) GPU.
 import pytest
 import torch
 
-from flashinfer.mqa_histogram import mqa_topk_indexer, mqa_topk_indexer_non_fused
+from flashinfer.dsv3_ops import mqa_topk_indexer
 from flashinfer.utils import is_sm100a_supported
 
 torch.manual_seed(0)
@@ -136,53 +136,42 @@ def _dsa_topk_indexer(q_fp8, k_cache_fp8, weights, seq_lens, block_table):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("pdl_enabled", [False])
 @pytest.mark.parametrize("B", [1, 2, 4, 32, 64])
-@pytest.mark.parametrize("L", [31, 1024, 4096, 8192, 4096 * 8, 4096 * 10])
-def test_mqa_topk_indexer(B, L, pdl_enabled):
+@pytest.mark.parametrize(
+    "L", [31, 1024, 4096, 8192, 4096 * 8, 4096 * 10, 1 << 17, 1 << 18]
+)
+def test_mqa_topk_indexer(B, L):
     if not is_sm100a_supported(torch.device("cuda")):
         pytest.skip("Requires SM100a (Blackwell)")
 
     lo = int(L * 0.7)
-    hi = min(168100, int(L * 1.3))
+    hi = min(1 << 19, int(L * 1.3))
     test_data = _make_dsa_test_data(B, (lo, hi))
 
     q, kv_cache, weights, seq_lens, block_table = test_data
     indices_ref, logits_ref = _dsa_topk_indexer(*test_data)
-    indices_0, logits_0 = mqa_topk_indexer_non_fused(
-        q, kv_cache, weights, seq_lens, block_table
-    )
     indices_1, logits_1 = mqa_topk_indexer(
-        q, kv_cache, weights, seq_lens, block_table, pdl_enabled=pdl_enabled
+        q, kv_cache, weights, seq_lens, block_table, max_model_len=hi
     )
 
     for i in range(B):
-        prefix = f"B={B}, L={L}, pdl={pdl_enabled}, batch {i}"
+        prefix = f"B={B}, L={L}, batch {i}"
         l = int(seq_lens[i])
 
-        logit_ref = logits_ref[i]
-        logit_0 = logits_0[i][:l]
+        logit_ref = logits_ref[i][:l]
         logit_1 = logits_1[i][:l]
 
-        diff = float((logit_0 - logit_ref).abs().max())
-        assert diff <= 1, f"{prefix}: non-fused logit max-diff {diff}"
         diff1 = float((logit_1 - logit_ref).abs().max())
         assert diff1 <= 1, f"{prefix}: fused logit max-diff {diff1}"
 
         inds_ref = indices_ref[i][indices_ref[i] >= 0]
-        inds_0 = indices_0[i][indices_0[i] >= 0]
         inds_1 = indices_1[i][indices_1[i] >= 0]
 
         assert (inds_ref < l).all(), f"{prefix}: ref indices out of range"
-        assert (inds_0 < l).all(), f"{prefix}: non-fused indices out of range"
         assert (inds_1 < l).all(), f"{prefix}: fused indices out of range"
 
         ref_topk = torch.sort(logit_ref[inds_ref])[0]
-        topk_0 = torch.sort(logit_0[inds_0])[0]
         topk_1 = torch.sort(logit_1[inds_1])[0]
-
-        topk_diff = float((ref_topk - topk_0).abs().max())
-        assert topk_diff <= 0.5, f"{prefix}: non-fused topk max-diff {topk_diff}"
 
         topk_diff = float((ref_topk - topk_1).abs().max())
         assert topk_diff <= 0.5, f"{prefix}: fused topk max-diff {topk_diff}"

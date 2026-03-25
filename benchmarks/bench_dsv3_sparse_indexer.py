@@ -19,10 +19,9 @@ import numpy as np
 import torch
 
 import flashinfer
-from flashinfer.mqa_histogram import (
+from flashinfer.dsv3_ops import (
     get_mqa_metadata,
     mqa_topk_indexer,
-    mqa_topk_indexer_non_fused,
 )
 from flashinfer.testing.utils import bench_gpu_time
 
@@ -101,7 +100,6 @@ def _make_test_data(batch_size: int, seq_len: int):
 def bench_dsv3_sparse_indexer(
     batch_size: int,
     seq_len: int,
-    pdl_enabled: bool = False,
     compare_deepgemm: bool = False,
 ) -> dict:
     """Benchmark the DSv3 sparse-attention indexer for one (batch, seq_len) point.
@@ -136,7 +134,6 @@ def bench_dsv3_sparse_indexer(
             block_table,
             sm_map=sm_map,
             max_model_len=max_model_len,
-            pdl_enabled=pdl_enabled,
         ),
         enable_cupti=enable_cupti,
         use_cuda_graph=use_cuda_graph,
@@ -145,29 +142,10 @@ def bench_dsv3_sparse_indexer(
     )
     fused_ms = np.median(measurements)
 
-    # -- non-fused: separate logits + radix top-K ----------------------------
-    measurements = bench_gpu_time(
-        lambda: mqa_topk_indexer_non_fused(
-            q,
-            k_cache,
-            weights,
-            seq_lens,
-            block_table,
-            sm_map=sm_map,
-            max_model_len=max_model_len,
-        ),
-        enable_cupti=enable_cupti,
-        use_cuda_graph=use_cuda_graph,
-        dry_run_iters=10,
-        repeat_iters=100,
-    )
-    non_fused_ms = np.median(measurements)
-
     result = {
         "batch_size": batch_size,
         "seq_len": seq_len,
         "mqa_fused_us": fused_ms * 1e3,
-        "mqa_non_fused_us": non_fused_ms * 1e3,
     }
 
     # -- deep_gemm reference: fp8_paged_mqa_logits + flashinfer top_k --------
@@ -217,11 +195,6 @@ def main():
         description="Benchmark DeepSeek v3 sparse-attention indexer"
     )
     parser.add_argument(
-        "--pdl",
-        action="store_true",
-        help="Enable PDL grid synchronisation in the fused kernel",
-    )
-    parser.add_argument(
         "--batch-sizes",
         type=int,
         nargs="+",
@@ -239,11 +212,8 @@ def main():
     )
     args = parser.parse_args()
 
-    pdl_str = " PDL=on" if args.pdl else ""
     print("=" * 100)
-    print(
-        f"dsv3_sparse_indexer: DeepSeek v3 sparse-attention end-to-end (k=2048, fp8){pdl_str}"
-    )
+    print("dsv3_sparse_indexer: DeepSeek v3 sparse-attention end-to-end (k=2048, fp8)")
     print("  mqa_fused:     FlashInfer fused logits + histogram top-K")
     print("  mqa_non_fused: FlashInfer separate logits + radix top-K")
     if HAS_DEEP_GEMM:
@@ -269,7 +239,6 @@ def main():
                 result = bench_dsv3_sparse_indexer(
                     batch_size,
                     seq_len,
-                    pdl_enabled=args.pdl,
                     compare_deepgemm=HAS_DEEP_GEMM,
                 )
                 line = (
